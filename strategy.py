@@ -82,9 +82,6 @@ PF_K_MULT = 1.4            # opponent raise rate -> share of hands it raises wit
 POST_K_MULT = 1.4
 K_FLOOR = 0.12
 HONESTY_PRIOR = 6          # showdowns before we fully trust the honesty check
-CHECKBET_PRIOR = 0.8       # starting guess: share of the times we check to it that it bets ...
-CHECKBET_PRIOR_N = 30      # ... worth this many observed chances
-CHECKBET_MIN = 0.05        # never narrow a check-bet range below this share
 
 # Mixed strategy: sometimes pick a close-to-best move so we are harder to read.
 MIX_TOL = 0.06             # moves within this share of the pot of the best are "close"
@@ -106,10 +103,6 @@ def _new_stats() -> dict:
         "faced": 10.0, "folded": 3.0,        # opponent fold rate when we bet/raise
         "pf_faced": 6.0, "pf_folded": 1.5,   # same, preflop only
         "my_faced": 10.0, "my_folded": 4.0,  # how often WE fold to its postflop bets
-        # How often it bets when we check to it, per street: [bets, chances].
-        # Starts at CHECKBET_PRIOR (worth CHECKBET_PRIOR_N chances).
-        "chk_bet": {s: [CHECKBET_PRIOR * CHECKBET_PRIOR_N, float(CHECKBET_PRIOR_N)]
-                    for s in (Street.FLOP, Street.TURN, Street.RIVER)},
         # Showdown check: are the hands it raises with really stronger?
         # [sum, count] of hand strength when it raised / did not raise.
         "sd_pf_r": [0.0, 0], "sd_pf_n": [0.0, 0],
@@ -231,13 +224,10 @@ def _learn(result: HandResult, memory: dict) -> None:
     owes_opp = 1 if not is_button else 0     # preflop: the button (SB) owes 1
     owes_me = 0
     first_pf_opp = True
-    checked_to_opp = False                   # our last move this street was a check (nothing owed)
     for s, is_me, act in hist:
         if s != street:
             street, owes_opp, owes_me = s, 0, 0
-            checked_to_opp = False
         if is_me:
-            checked_to_opp = (street != Street.PREFLOP and act == Action.CHECK_CALL and not owes_me)
             if owes_me and street != Street.PREFLOP:
                 st["my_faced"] += 1
                 st["my_folded"] += act == Action.FOLD
@@ -261,11 +251,6 @@ def _learn(result: HandResult, memory: dict) -> None:
         else:
             st["post_dec"] += 1
             st["post_raise"] += raised
-            if checked_to_opp and not owes_opp:
-                cb = st["chk_bet"][street]
-                cb[0] += raised
-                cb[1] += 1
-            checked_to_opp = False
             if owes_opp:
                 st["faced"] += 1
                 st["folded"] += act == Action.FOLD
@@ -358,26 +343,12 @@ def _range_fraction(obs: Observation, st: dict) -> float:
     call_k = min(max(1.0 - _rate(st, "folded", "faced"), 0.4), 1.0)
     f = 1.0
     my_bet_pending = False
-    we_checked = False          # our last move on this street was a check (not a call)
-    opp_bet_pending = False
-    street = None
     for a in obs.action_history:
-        if a.street != street:
-            street, we_checked, opp_bet_pending = a.street, False, False
         if a.is_me:
             my_bet_pending = a.action in (Action.RAISE_HALF, Action.RAISE_POT)
-            we_checked = (a.street != Street.PREFLOP and a.action == Action.CHECK_CALL
-                          and not opp_bet_pending)
-            opp_bet_pending = False
             continue
         if a.action in (Action.RAISE_HALF, Action.RAISE_POT):
-            opp_bet_pending = True
-            if we_checked:
-                # It bet after we checked: it keeps its best `rate` share of
-                # hands, where rate = how often it bets when checked to here.
-                rate = _checkbet_rate(st, a.street)
-                f *= rate if a.street == obs.street else math.sqrt(rate)
-            elif a.street == Street.PREFLOP:
+            if a.street == Street.PREFLOP:
                 f *= pf_k
             elif a.street == obs.street:
                 f *= post_k
@@ -385,14 +356,8 @@ def _range_fraction(obs: Observation, st: dict) -> float:
                 f *= math.sqrt(post_k)
         elif a.action == Action.CHECK_CALL and my_bet_pending and a.street != Street.PREFLOP:
             f *= call_k
-        my_bet_pending = we_checked = False
+        my_bet_pending = False
     return max(f, 0.05)
-
-
-def _checkbet_rate(st: dict, street: Street) -> float:
-    """Smoothed share of the times we checked to it on `street` that it bet."""
-    bets, chances = st["chk_bet"][street]
-    return min(max(bets / chances, CHECKBET_MIN), 1.0)
 
 
 def _num_samples(obs: Observation, memory: dict) -> int:
