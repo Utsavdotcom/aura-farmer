@@ -113,6 +113,9 @@ def new_half(config: AgentConfig, memory: dict) -> None:
     memory["np_rng"] = np.random.default_rng(12345)
     memory["hand"] = None        # (hand_index, is_button)
     memory["hist"] = []          # last seen action history of the current hand
+    memory["pots"] = None        # (pot after our last move, chips the opponent needs to call it)
+    memory["blinds"] = int(config.small_blind) + int(config.big_blind)
+    memory["last_learned"] = -1  # hand_index of the last hand learned from
 
 
 def choose_action(obs: Observation, memory: dict) -> Action:
@@ -122,23 +125,45 @@ def choose_action(obs: Observation, memory: dict) -> Action:
             new_half(AgentConfig(), memory)
         memory["hand"] = (obs.hand_index, obs.is_button)
         action = _decide(obs, memory)
-        # remember the history plus our own move (used by on_hand_end)
-        memory["hist"] = [(a.street, a.is_me, a.action) for a in obs.action_history]
-        memory["hist"].append((obs.street, True, action))
     except Exception:
         action = None
+    action = _safe(action, obs)
+    try:
+        # Remember the history plus the move we actually return (used by on_hand_end).
+        hist = [(a.street, a.is_me, a.action) for a in obs.action_history]
+        hist.append((obs.street, True, action))
+        memory["hand"] = (obs.hand_index, obs.is_button)
+        memory["hist"], memory["pots"] = hist, _pots_after(obs, action)
+    except Exception:
+        memory["hist"], memory["pots"] = [], None
     memory["t_used"] = memory.get("t_used", 0.0) + time.perf_counter() - start
-    return _safe(action, obs)
+    return action
 
 
 def on_hand_end(result: HandResult, memory: dict) -> None:
     start = time.perf_counter()
     try:
-        _learn(result, memory)
+        # Each hand is learned from once, even if it were delivered twice.
+        if result.hand_index > memory.get("last_learned", -1):
+            memory["last_learned"] = result.hand_index
+            _learn(result, memory)
     except Exception:
         pass
-    memory["hist"] = []
+    memory["hist"], memory["pots"] = [], None
     memory["t_used"] = memory.get("t_used", 0.0) + time.perf_counter() - start
+
+
+def _pots_after(obs: Observation, action: Action) -> tuple[int, int]:
+    """(pot right after our move, chips the opponent must add to call it)."""
+    if action in (Action.RAISE_HALF, Action.RAISE_POT):
+        raise_to = obs.raise_to[action]
+        ours = raise_to - obs.my_bet
+        opp_call = min(raise_to - obs.opp_bet, obs.opp_stack)
+    elif action == Action.CHECK_CALL:
+        ours, opp_call = min(obs.to_call, obs.my_stack), 0
+    else:
+        ours, opp_call = 0, 0
+    return obs.pot + ours, opp_call
 
 
 # ---------------------------------------------------------------------------
@@ -167,13 +192,15 @@ def _learn(result: HandResult, memory: dict) -> None:
     have_hist = hand is not None and hand[0] == result.hand_index and hist
 
     if not have_hist:
-        # We never acted: we were big blind and the button folded at once.
-        if not result.went_to_showdown and result.winner == "me":
+        # We never acted: we were big blind and the button folded at once
+        # (the pot then holds only the blinds).
+        if (not result.went_to_showdown and result.winner == "me"
+                and result.pot == memory.get("blinds", 3)):
             st["pf_dec"] += 1
         return
 
     is_button = hand[1]
-    hist.extend(_hand_ending_opp_actions(hist, result))
+    hist.extend(_hand_ending_opp_actions(hist, result, memory.get("pots")))
 
     # Walk through the hand, tracking who owes chips, to see what the
     # opponent faced each time it acted.
@@ -217,23 +244,34 @@ def _learn(result: HandResult, memory: dict) -> None:
         _learn_showdown(result, hist, memory)
 
 
-def _hand_ending_opp_actions(hist: list, result: HandResult) -> list:
-    """The opponent's actions after our last decision, which we never see in
-    an Observation. `hist` ends with our own last action.
-      * no showdown and we won        -> it folded
-      * showdown after our raise      -> it called (a re-raise would have
-                                         given us another decision)
-      * showdown after we checked first on a postflop street -> it checked
-        behind (a bet would have given us another decision)
-    Otherwise our check/call closed the betting and it did nothing more."""
-    if not hist or not hist[-1][1]:
+def _hand_ending_opp_actions(hist: list, result: HandResult, pots) -> list:
+    """The opponent's actions after our last decision, which no Observation
+    shows us. `hist` ends with our own last action. In heads-up the opponent
+    can't act twice in a row without giving us a decision (game.py), so:
+      * no showdown and we won          -> it folded
+      * showdown after our raise        -> it called (a re-raise would have
+                                           given us another decision)
+      * showdown after we checked first on the river -> it checked behind
+        (a bet would have given us another decision; on earlier streets a
+        check-check leads to another decision for us, not a showdown)
+    Otherwise our check/call closed the betting and it did nothing more.
+
+    Each inference must also match the final pot exactly (`pots` comes from
+    _pots_after). If it doesn't, our record is incomplete (e.g. the judge
+    played a move for us), so nothing is inferred rather than guessing."""
+    if not hist or not hist[-1][1] or pots is None:
         return []
     street, _, last = hist[-1]
+    pot_after, opp_call = pots
     if not result.went_to_showdown:
-        return [(street, False, Action.FOLD)] if result.winner == "me" else []
+        if result.winner == "me" and result.pot == pot_after:
+            return [(street, False, Action.FOLD)]
+        return []
     if last in (Action.RAISE_HALF, Action.RAISE_POT):
-        return [(street, False, Action.CHECK_CALL)]
-    if last == Action.CHECK_CALL and street != Street.PREFLOP:
+        if opp_call > 0 and result.pot == pot_after + opp_call:
+            return [(street, False, Action.CHECK_CALL)]
+        return []
+    if last == Action.CHECK_CALL and street == Street.RIVER and result.pot == pot_after:
         opp_acted_this_street = any(s == street and not me for s, me, _ in hist[:-1])
         if not opp_acted_this_street:
             return [(street, False, Action.CHECK_CALL)]
