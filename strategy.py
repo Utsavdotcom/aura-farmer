@@ -68,6 +68,8 @@ SAMPLES = {Street.FLOP: (200, 300), Street.TURN: (200, 300), Street.RIVER: (150,
 OVERHEAD_PER_CALL = 5e-5
 PROJECTED_LIMIT = 5.0      # if this half is projected to use more, switch to cheap mode
 CHEAP_SAMPLES = 48         # samples per decision in cheap mode
+CLOSE_GAP = 0.03           # if our top two moves are within this share of the pot ...
+CLOSE_EXTRA = 400          # ... draw this many more samples (same seeded generator) and decide again
 HARD_LIMIT = 7.0           # past this, play check/fold after the flop (no simulation)
 MIN_HANDS_TO_PROJECT = 50  # don't extrapolate from the first few hands
 
@@ -417,16 +419,35 @@ def _decide(obs: Observation, memory: dict) -> Action:
         if n == 0:
             return Action.CHECK_CALL if obs.to_call == 0 else Action.FOLD
         low_scale = min(1.0, _rate(st, "post_raise", "post_dec") / 0.3)
-        eq = _postflop_equity(obs, memory, n, low_scale)
+        rng = _state_rng(obs)
+        sims = sample_showdowns(obs.hole_cards, obs.board, n, rng)
+        eq = _postflop_equity(obs, sims, low_scale)
         e_now, e_called = eq(f), eq(keep)
+        # Close call between our top two moves: sampling noise could flip it,
+        # so draw more samples from the same generator (still repeatable) and
+        # decide again on all of them. Full mode only (never when short on time).
+        if n > CHEAP_SAMPLES and _top2_gap(_action_evs(obs, e_now, e_called, p_fold)) < CLOSE_GAP * max(obs.pot, 1):
+            more = sample_showdowns(obs.hole_cards, obs.board, CLOSE_EXTRA, rng)
+            sims = tuple(np.concatenate(pair) for pair in zip(sims, more))
+            eq = _postflop_equity(obs, sims, low_scale)
+            e_now, e_called = eq(f), eq(keep)
+            counts = memory.setdefault("mode_counts", {})
+            counts["resampled"] = counts.get("resampled", 0) + 1
     ev = _action_evs(obs, e_now, e_called, p_fold)
     return _mix(obs, ev, e_now, memory["rng"])
 
 
-def _postflop_equity(obs, memory, n, low_scale):
-    """Simulate n showdowns once; return eq(frac): our win chance
+def _top2_gap(ev: dict) -> float:
+    """Chips between the best and second-best move (inf if only one move)."""
+    vals = sorted(ev.values(), reverse=True)
+    return vals[0] - vals[1] if len(vals) > 1 else math.inf
+
+
+def _postflop_equity(obs, sims, low_scale):
+    """From simulated showdowns (my, opp, now) return eq(frac): our win chance
     against the opponent's best `frac` of hands (other hands weighted low)."""
-    my, opp, now = sample_showdowns(obs.hole_cards, obs.board, n, _state_rng(obs))
+    my, opp, now = sims
+    n = len(my)
     win = (my > opp) + 0.5 * (my == opp)
     # rank the opponent's sampled hands by how good they are right now
     pct = np.empty(n)
