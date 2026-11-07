@@ -264,3 +264,37 @@ def test_full_half_fits_time_budget():
             game.apply(action)
         strategy.on_hand_end(game.hand_result(0), memory)
     assert time.perf_counter() - start < 6.0
+
+
+def test_opponent_stats_count_hand_ending_actions():
+    # The opponent's last action (a river call, a check behind, a fold) never
+    # reaches choose_action. The postflop stats must still count every
+    # opponent decision and every time it faced our bet, exactly.
+    import strategy
+    memory = {}
+    strategy.new_half(AgentConfig(), memory)
+    start = dict(memory["stats"])
+    rng = random.Random(1)
+    decisions = faced = folded = 0
+    for hand in range(400):
+        game = Game(make_deal("stats", hand), button_seat=hand % 2, hand_index=hand)
+        we_bet = False
+        while not game.is_terminal:
+            obs = game.observation(game.to_act)
+            if game.to_act == 0:
+                action = strategy.choose_action(obs, memory)
+                we_bet = action in (Action.RAISE_HALF, Action.RAISE_POT)
+            else:
+                # folds 40% to our bets, otherwise calls or checks (never raises)
+                action = Action.FOLD if we_bet and rng.random() < 0.4 else Action.CHECK_CALL
+                if obs.street != 0:
+                    decisions += 1
+                    faced += we_bet
+                    folded += action == Action.FOLD
+                we_bet = False
+            game.apply(action)
+        strategy.on_hand_end(game.hand_result(0), memory)
+    st = memory["stats"]
+    assert st["post_dec"] - start["post_dec"] == decisions
+    assert st["faced"] - start["faced"] == faced
+    assert st["folded"] - start["folded"] == folded

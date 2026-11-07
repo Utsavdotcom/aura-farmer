@@ -173,8 +173,7 @@ def _learn(result: HandResult, memory: dict) -> None:
         return
 
     is_button = hand[1]
-    if not result.went_to_showdown and result.winner == "me":
-        hist.append((hist[-1][0], False, Action.FOLD))   # opponent folded last
+    hist.extend(_hand_ending_opp_actions(hist, result))
 
     # Walk through the hand, tracking who owes chips, to see what the
     # opponent faced each time it acted.
@@ -216,6 +215,29 @@ def _learn(result: HandResult, memory: dict) -> None:
 
     if result.went_to_showdown and result.opp_hole and len(result.board) == 5:
         _learn_showdown(result, hist, memory)
+
+
+def _hand_ending_opp_actions(hist: list, result: HandResult) -> list:
+    """The opponent's actions after our last decision, which we never see in
+    an Observation. `hist` ends with our own last action.
+      * no showdown and we won        -> it folded
+      * showdown after our raise      -> it called (a re-raise would have
+                                         given us another decision)
+      * showdown after we checked first on a postflop street -> it checked
+        behind (a bet would have given us another decision)
+    Otherwise our check/call closed the betting and it did nothing more."""
+    if not hist or not hist[-1][1]:
+        return []
+    street, _, last = hist[-1]
+    if not result.went_to_showdown:
+        return [(street, False, Action.FOLD)] if result.winner == "me" else []
+    if last in (Action.RAISE_HALF, Action.RAISE_POT):
+        return [(street, False, Action.CHECK_CALL)]
+    if last == Action.CHECK_CALL and street != Street.PREFLOP:
+        opp_acted_this_street = any(s == street and not me for s, me, _ in hist[:-1])
+        if not opp_acted_this_street:
+            return [(street, False, Action.CHECK_CALL)]
+    return []
 
 
 def _learn_showdown(result: HandResult, hist: list, memory: dict) -> None:
