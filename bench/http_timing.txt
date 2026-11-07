@@ -1,0 +1,12 @@
+original   vs always_pot half 1: startup 2.24s | agent1: thinking 5.79s of 8s (wall 9.18s), calls 3429, errors 0
+original   vs always_pot half 2: startup 2.11s | agent1: thinking 5.28s of 8s (wall 8.66s), calls 3439, errors 0
+original   vs always_pot combined: agent1: +6.556 bb/deal  (std 25.51, stderr 0.807) | Confidence interval (z=1.96): [+4.975, +8.137] bb/deal | Reason: interval [+4.975, +8.137] is entirely above 0 | RESULT: AGENT1_WIN
+corrected  vs always_pot half 1: startup 2.16s | agent1: thinking 5.22s of 8s (wall 8.64s), calls 3485, errors 0
+corrected  vs always_pot half 2: startup 2.12s | agent1: thinking 5.40s of 8s (wall 8.81s), calls 3487, errors 0
+corrected  vs always_pot combined: agent1: +7.146 bb/deal  (std 24.96, stderr 0.789) | Confidence interval (z=1.96): [+5.599, +8.692] bb/deal | Reason: interval [+5.599, +8.692] is entirely above 0 | RESULT: AGENT1_WIN
+original   vs random     half 1: startup 2.17s | agent1: thinking 3.77s of 8s (wall 6.21s), calls 2490, errors 0
+original   vs random     half 2: startup 2.11s | agent1: thinking 3.48s of 8s (wall 5.91s), calls 2490, errors 0
+original   vs random     combined: agent1: +7.282 bb/deal  (std 26.35, stderr 0.833) | Confidence interval (z=1.96): [+5.649, +8.916] bb/deal | Reason: interval [+5.649, +8.916] is entirely above 0 | RESULT: AGENT1_WIN
+corrected  vs random     half 1: startup 2.17s | agent1: thinking 3.40s of 8s (wall 5.79s), calls 2448, errors 0
+corrected  vs random     half 2: startup 2.11s | agent1: thinking 3.42s of 8s (wall 5.90s), calls 2541, errors 0
+corrected  vs random     combined: agent1: +7.806 bb/deal  (std 26.17, stderr 0.828) | Confidence interval (z=1.96): [+6.184, +9.427] bb/deal | Reason: interval [+6.184, +9.427] is entirely above 0 | RESULT: AGENT1_WIN

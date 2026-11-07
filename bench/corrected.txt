@@ -1,0 +1,6 @@
+# corrected (opp-history-fix working tree), tools/sim.py --opp learner,tag,nit,lag,always_pot --deals 1000 --seeds 3
+learner           -1.043 bb/deal  [-1.565, -0.521]  LOSE   max think 3.08s/half
+tag               +1.654 bb/deal  [+1.195, +2.113]  WIN    max think 3.36s/half
+nit               +1.016 bb/deal  [+0.658, +1.373]  WIN    max think 2.30s/half
+lag               +3.299 bb/deal  [+2.687, +3.911]  WIN    max think 4.92s/half
+always_pot        +7.412 bb/deal  [+6.515, +8.309]  WIN    max think 4.37s/half

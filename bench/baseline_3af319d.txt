@@ -1,0 +1,6 @@
+# original 3af319d, tools/sim.py --opp learner,tag,nit,lag,always_pot --deals 1000 --seeds 3
+learner           -0.746 bb/deal  [-1.287, -0.206]  LOSE   max think 3.68s/half
+tag               +1.509 bb/deal  [+1.052, +1.966]  WIN    max think 3.92s/half
+nit               +1.041 bb/deal  [+0.676, +1.405]  WIN    max think 2.22s/half
+lag               +3.142 bb/deal  [+2.533, +3.751]  WIN    max think 4.37s/half
+always_pot        +7.174 bb/deal  [+6.281, +8.067]  WIN    max think 3.63s/half
