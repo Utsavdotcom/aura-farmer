@@ -2,11 +2,49 @@
 
 Read `README.md` for the tournament rules. This file covers what we built and how to work on it.
 
+## Handoff for a fresh session (2026-11-07)
+
+**Submitted commit:** `070ce721b1a512f6fc949d1c72536dd7ab237624` on `aayush` (remote `aura` = github.com/Utsavdotcom/aura-farmer). Upstream `origin` = tamu-datathon-org/heads-up-bundle; its `game.py` / `evaluator.py` / `judge_engine.py` are byte-identical to ours (checked 2026-11-07). Never edit those, `docker/` or `baseline-bots/`.
+
+| Branch | Tip | What |
+|---|---|---|
+| `aayush` | this commit (submitted code = `070ce72`) | main line |
+| `opp-history-fix` | `3585a7d` | opponent-stats fix (merged) |
+| `time-safety` | `070ce72` | fixed sample counts, field clones (merged) |
+
+Not yet done: `tools/check_build.sh` (no Docker on the dev laptop). This is Windows: use `.venv/Scripts/python.exe`, and `http://127.0.0.1:PORT` for the judge (`localhost` fails here).
+
+**Seeds:** tune on `sim0`-`sim7` (`tools/sim.py`); confirm only on `hold0`-`hold7` (`tools/field_eval.py`). Never tune on hold seeds.
+
+**Commands**
+```
+.venv/Scripts/python.exe -m pytest -q                                   # 42 tests
+.venv/Scripts/python.exe tools/sim.py --opp learner,tag,nit,lag,always_pot --deals 1000 --seeds 8
+.venv/Scripts/python.exe tools/field_eval.py                            # f1-f4 + learner on hold0-hold7, with leak table
+# judge timing (fresh servers per half, like the tournament):
+PORT=5008 .venv/Scripts/python.exe agent.py   &   PORT=5009 .venv/Scripts/python.exe baseline-bots/baseline_always_pot.py &
+.venv/Scripts/python.exe judge_engine.py --agent1 http://127.0.0.1:5008 --agent2 http://127.0.0.1:5009 --half 1 --seed 7
+```
+Paired before/after comparisons and calibrated timing used scratch scripts (session-temp folder, may be gone):
+`C:\Users\rajes\AppData\Local\Temp\claude\a32a1c84fb274f89\3640397d-4643-470b-b94e-c4a1259c8aa6\scratchpad\`
+- `dump.py <root> <out.json> <opps> <seeds> <deals>` then `compare.py <old.json> <new.json>`: per-deal paired diff with 95% CI. Run the old version from a `git archive <sha>` export.
+- `calib.py <root> <label> <opp> <seed> <half>`: judge-charged vs internal time (`SLOW_FACTOR=1.5` emulates a slower CPU).
+
+**Competitor bots (upstream open PRs #1 and #2), for testing only, never copy or commit their code:**
+`...\scratchpad\competitors\pr1`, `...\pr2` (exports), `...\venv_comp` (throwaway venv with numba 0.68.1 for PR #2), `...\comp_eval.py`, results in `...\comp_results.txt`. Run:
+`venv_comp\Scripts\python.exe comp_eval.py <070ce72 export dir> pr2 PR2 8 1000`. PR #2's `agent.py` hides code in an `exec(zlib/base64)` blob; it was decoded and reviewed (no network/file/process calls) before running.
+
+**Key results so far** (bb/deal, duplicate, 8000 deals each)
+- Timing: judge-charged at most 3.1 s per half (4.8 s at 1.5x slower CPU), 0 errors. Decisions are fully repeatable. Open risk: on a contended CPU the judge charged 6.4 s while our timer read 4.5 s.
+- `sim` seeds vs 3585a7d: no opponent significantly worse after the time-safety change (`bench/phase1_paired.txt`).
+- Held-out: F1 +4.00, F2 +1.63, F3 +5.79 (wins); **F4 -0.97, learner -0.66 (losses)**; **PR #2 -2.17 (loss)**; PR #1 -0.18 (chop).
+- Main leak: we fold too often after checking. F4 and PR #2 bet ~90-97% of the time when we check and our turn/river folds to half-pot bets lose the most. Next phase: defend checks (minimum-defence calling), use our own tracked fold rate (`my_folded`), add deliberate check-raises/bluffs.
+
 ## Setup (5 minutes)
 ```
 python3 -m venv .venv
 .venv/bin/pip install -r requirements-dev.txt numpy
-.venv/bin/python -m pytest -q          # should say: 17 passed
+.venv/bin/python -m pytest -q          # should say: 42 passed
 ```
 
 ## Where things are
