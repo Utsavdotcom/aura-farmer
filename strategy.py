@@ -20,6 +20,7 @@ from __future__ import annotations
 import math
 import random
 import time
+import zlib
 
 import numpy as np
 
@@ -54,11 +55,21 @@ sample_showdowns([0, 5, 10, 20, 30], [1, 2, 3], 64, np.random.default_rng(0))
 # Tunable settings
 # ---------------------------------------------------------------------------
 
-TIME_BUDGET = 5.5          # seconds of our own thinking per half (limit is 8)
-MAX_SAMPLES = 500
-MIN_SAMPLES = 48
-SEC_PER_SAMPLE = 1.4e-6    # measured cost of one simulated showdown
-DECISIONS_PER_HAND = 3.0   # rough guess, used to spread the time budget
+# Simulated showdowns per postflop decision. Fixed (not time-based) so the
+# same deal and history always give the same decision on any machine.
+# More samples when facing a bet: those decisions put the most chips at risk.
+SAMPLES = {Street.FLOP: (200, 300), Street.TURN: (200, 300), Street.RIVER: (150, 250)}  # (no bet, facing a bet)
+
+# Time safety. The judge charges each request's time minus a free 1 ms.
+# Measured on an idle core, that is our own timer plus about 0.03 ms per
+# call; 0.05 ms per call is added as a margin. (On a contended core the
+# judge also charges time spent waiting for the CPU outside our code: in one
+# measurement our timer read 4.5 s while the judge charged 6.4 s.)
+OVERHEAD_PER_CALL = 5e-5
+PROJECTED_LIMIT = 5.0      # if this half is projected to use more, switch to cheap mode
+CHEAP_SAMPLES = 48         # samples per decision in cheap mode
+HARD_LIMIT = 7.0           # past this, play check/fold after the flop (no simulation)
+MIN_HANDS_TO_PROJECT = 50  # don't extrapolate from the first few hands
 
 REALIZE_IP = 0.97          # share of equity we keep when acting last
 REALIZE_OOP = 0.88         # ... when acting first
@@ -116,10 +127,13 @@ def new_half(config: AgentConfig, memory: dict) -> None:
     memory["pots"] = None        # (pot after our last move, chips the opponent needs to call it)
     memory["blinds"] = int(config.small_blind) + int(config.big_blind)
     memory["last_learned"] = -1  # hand_index of the last hand learned from
+    memory["calls"] = 0          # choose_action calls this half (for the overhead estimate)
+    memory["mode_counts"] = {"full": 0, "cheap": 0, "none": 0}   # postflop sample modes used
 
 
 def choose_action(obs: Observation, memory: dict) -> Action:
     start = time.perf_counter()
+    memory["calls"] = memory.get("calls", 0) + 1
     try:
         if "stats" not in memory:            # safety: new_half was never called
             new_half(AgentConfig(), memory)
@@ -345,13 +359,35 @@ def _range_fraction(obs: Observation, st: dict) -> float:
 
 
 def _num_samples(obs: Observation, memory: dict) -> int:
-    left_hands = max(memory["num_hands"] - obs.hand_index, 1)
-    left_time = TIME_BUDGET - memory["t_used"]
-    per_decision = left_time / (left_hands * DECISIONS_PER_HAND)
-    n = int((per_decision - 1.5e-4) / SEC_PER_SAMPLE)
-    if left_time < 0.3:
+    """Fixed sample count for this street and situation. Only if this half is
+    on course to use too much of the time bank (a slow machine) do we drop to
+    cheap mode, and past HARD_LIMIT to no simulation at all."""
+    used = _charged_estimate(memory)
+    counts = memory.setdefault("mode_counts", {"full": 0, "cheap": 0, "none": 0})
+    if used > HARD_LIMIT:
+        counts["none"] += 1
         return 0
-    return max(MIN_SAMPLES, min(MAX_SAMPLES, n))
+    done = obs.hand_index + 1
+    projected = used * memory.get("num_hands", 1000) / done if done >= MIN_HANDS_TO_PROJECT else used
+    if max(used, projected) > PROJECTED_LIMIT:
+        counts["cheap"] += 1
+        return CHEAP_SAMPLES
+    counts["full"] += 1
+    no_bet, facing = SAMPLES[obs.street]
+    return facing if obs.to_call > 0 else no_bet
+
+
+def _charged_estimate(memory: dict) -> float:
+    """Our estimate of the time bank the judge has charged so far."""
+    return memory.get("t_used", 0.0) + memory.get("calls", 0) * OVERHEAD_PER_CALL
+
+
+def _state_rng(obs: Observation) -> np.random.Generator:
+    """A random generator seeded from the cards and the betting so far, so the
+    same deal and history always give the same simulation (and decision)."""
+    key = (tuple(obs.hole_cards), tuple(obs.board), int(obs.street), bool(obs.is_button),
+           tuple((int(a.street), bool(a.is_me), int(a.action), int(a.amount)) for a in obs.action_history))
+    return np.random.default_rng(zlib.crc32(repr(key).encode()))
 
 
 def _invest(obs: Observation, raise_to: int) -> tuple[int, int]:
@@ -390,7 +426,7 @@ def _decide(obs: Observation, memory: dict) -> Action:
 def _postflop_equity(obs, memory, n, low_scale):
     """Simulate n showdowns once; return eq(frac): our win chance
     against the opponent's best `frac` of hands (other hands weighted low)."""
-    my, opp, now = sample_showdowns(obs.hole_cards, obs.board, n, memory["np_rng"])
+    my, opp, now = sample_showdowns(obs.hole_cards, obs.board, n, _state_rng(obs))
     win = (my > opp) + 0.5 * (my == opp)
     # rank the opponent's sampled hands by how good they are right now
     pct = np.empty(n)
