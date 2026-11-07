@@ -625,3 +625,39 @@ def test_charged_estimate_adds_per_call_overhead():
     import strategy
     memory = {"t_used": 2.0, "calls": 1000}
     assert strategy._charged_estimate(memory) == pytest.approx(2.0 + 1000 * strategy.OVERHEAD_PER_CALL)
+
+
+# ---------------------------------------------------------------------------
+# Field clones (tools/field/): practice opponents must be legal and fast too
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("bot_file", ["f1_equity.py", "f2_rules.py", "f3_aggro.py", "f4_exploit.py"])
+def test_field_bot_legal_and_fast(bot_file):
+    import time
+    spec = importlib.util.spec_from_file_location(
+        "field_" + bot_file[:-3], os.path.join(BUNDLE, "tools", "field", bot_file))
+    bot = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(bot)
+    opp = _random_opp(0.4, bot_file)
+    memory = {}
+    bot.new_half(AgentConfig(), memory)
+    think, slowest = 0.0, 0.0
+    for hand in range(300):
+        seat = hand // 2 % 2
+        game = Game(make_deal("field-" + bot_file, hand), button_seat=hand % 2, hand_index=hand)
+        while not game.is_terminal:
+            obs = game.observation(game.to_act)
+            if game.to_act == seat:
+                t = time.perf_counter()
+                action = bot.choose_action(obs, memory)
+                dt = time.perf_counter() - t
+                think, slowest = think + dt, max(slowest, dt)
+                assert action in obs.legal_actions, (bot_file, action, obs.legal_actions)
+            else:
+                action = opp.choose_action(obs, {})
+            game.apply(action)
+        t = time.perf_counter()
+        bot.on_hand_end(game.hand_result(seat), memory)
+        think += time.perf_counter() - t
+    assert think / 300 * 1000 < 6.0, f"{bot_file}: {think / 300 * 1000:.2f} s per 1000 hands"
+    assert slowest < 0.25, f"{bot_file}: slowest decision {slowest * 1000:.1f} ms"
