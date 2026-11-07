@@ -1,0 +1,8 @@
+# Paired per-deal comparison, tools/sim.py duplicate matches, seeds sim0-sim7 x 1000 deals (8000 deals per opponent)
+# 'original' = 3585a7d (time-based samples), 'corrected' = fixed counts (time-safety branch). Columns: bb/deal [95% CI] verdict
+opponent                    original                corrected       paired diff (fix - orig)  think orig/fix (max s/half)
+learner     -0.674 [-0.99,-0.36] LOSE -0.380 [-0.70,-0.06] LOSE   +0.294 [-0.025,+0.614]   5.22/1.87   (n=8000 deals)
+tag         +1.917 [+1.63,+2.20] WIN  +1.814 [+1.53,+2.10] WIN    -0.104 [-0.330,+0.123]   3.58/1.81   (n=8000 deals)
+nit         +1.122 [+0.90,+1.35] WIN  +1.033 [+0.81,+1.26] WIN    -0.089 [-0.243,+0.065]   2.10/1.16   (n=8000 deals)
+lag         +3.468 [+3.10,+3.84] WIN  +3.600 [+3.24,+3.96] WIN    +0.132 [-0.186,+0.451]   4.52/2.67   (n=8000 deals)
+always_pot  +7.544 [+7.00,+8.09] WIN  +7.515 [+6.97,+8.06] WIN    -0.029 [-0.371,+0.313]   4.92/2.52   (n=8000 deals)

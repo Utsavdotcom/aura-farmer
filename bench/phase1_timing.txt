@@ -1,0 +1,14 @@
+# Judge-charged time per half (judge_engine.py over HTTP, fresh server per half, seed 7).
+# 'internal' = the bot's own timer. '1.5x CPU' = each strategy call followed by a busy-wait of 0.5x its length.
+normal   final      always_pot seed 7 half 1: charged 2.75s  internal 2.82s  calls 3459  overhead -0.021 ms/call  errors 0  modes {'full': 1716, 'cheap': 0, 'none': 0}
+normal   final      always_pot seed 7 half 2: charged 2.59s  internal 2.79s  calls 3509  overhead -0.057 ms/call  errors 0  modes {'full': 1783, 'cheap': 0, 'none': 0}
+normal   final      lag        seed 7 half 1: charged 3.11s  internal 3.10s  calls 3405  overhead 0.003 ms/call  errors 0  modes {'full': 2293, 'cheap': 0, 'none': 0}
+normal   final      lag        seed 7 half 2: charged 3.05s  internal 3.02s  calls 3328  overhead 0.010 ms/call  errors 0  modes {'full': 2216, 'cheap': 0, 'none': 0}
+normal   final      random     seed 7 half 1: charged 1.83s  internal 1.88s  calls 2572  overhead -0.019 ms/call  errors 0  modes {'full': 1251, 'cheap': 0, 'none': 0}
+normal   final      random     seed 7 half 2: charged 1.63s  internal 1.63s  calls 2414  overhead 0.002 ms/call  errors 0  modes {'full': 1014, 'cheap': 0, 'none': 0}
+1.5x CPU final      always_pot seed 7 half 1: charged 4.20s  internal 4.24s  calls 3459  overhead -0.010 ms/call  errors 0  modes {'full': 1716, 'cheap': 0, 'none': 0}
+1.5x CPU final      always_pot seed 7 half 2: charged 4.23s  internal 4.31s  calls 3509  overhead -0.023 ms/call  errors 0  modes {'full': 1783, 'cheap': 0, 'none': 0}
+1.5x CPU final      lag        seed 7 half 1: charged 4.80s  internal 4.66s  calls 3375  overhead 0.042 ms/call  errors 0  modes {'full': 2240, 'cheap': 21, 'none': 0}
+1.5x CPU final      lag        seed 7 half 2: charged 4.68s  internal 4.59s  calls 3347  overhead 0.027 ms/call  errors 0  modes {'full': 2227, 'cheap': 7, 'none': 0}
+1.5x CPU final      random     seed 7 half 1: charged 2.84s  internal 2.86s  calls 2572  overhead -0.007 ms/call  errors 0  modes {'full': 1251, 'cheap': 0, 'none': 0}
+1.5x CPU final      random     seed 7 half 2: charged 2.46s  internal 2.48s  calls 2414  overhead -0.007 ms/call  errors 0  modes {'full': 1014, 'cheap': 0, 'none': 0}

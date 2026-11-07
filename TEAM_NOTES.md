@@ -22,7 +22,7 @@ python3 -m venv .venv
 | `test_agent.py` | Tests. Run them before every push. |
 
 ## How the bot decides (strategy.py)
-1. **Win chance ("equity"):** a table lookup before the flop. After the flop, it plays out about 500 random endings.
+1. **Win chance ("equity"):** a table lookup before the flop. After the flop, it plays out a fixed 150-300 random endings (more when facing a bet), seeded from the cards and betting so the same situation always gives the same decision.
 2. **Opponent's likely hands:** when the opponent raises, it narrows them down, more so if that opponent rarely raises.
 3. **Truth check:** at showdown it checks whether the opponent's raises really came with strong hands. If not, it trusts them less.
 4. **Fold rate:** it tracks how often this opponent folds to our bets.
@@ -42,7 +42,7 @@ Everything it learns resets every half (the tournament rule).
 ## Current results (1000 deals x 3 runs)
 - Clear wins vs all 4 baselines (+7 to +12), sticky (+7), lag (+3), tag (+1.5) and nit (+1.0).
 - **We lose to `learner` (-0.75).** This is the main open problem.
-- Thinking time: at most about 2.5 s of the 8 s allowed per half. 0 errors.
+- Thinking time (judge-charged, laptop): at most about 3.1 s of the 8 s per half, 4.8 s with a 1.5x slower CPU. 0 errors. See bench/phase1_timing.txt.
 
 ## Open work (in order)
 1. **Beat `learner`.** Already tried with no gain: calling more vs frequent bettors, counting bluffs from shown hands, and making checks cost more. Our river folds look correct (we're usually behind when we fold).

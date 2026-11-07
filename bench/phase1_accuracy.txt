@@ -1,0 +1,32 @@
+# Equity/action accuracy on 500 recorded postflop decisions vs a 5000-sample reference (fixed counts vs 500 samples)
+decision points: 500 {'FLOP': 284, 'TURN': 146, 'RIVER': 70} facing a bet: 220
+new fixed: MAE e_now 0.0262  MAE e_called 0.0266  (95th pct 0.0663)  best action differs 7.0%  mean EV given up 0.0025 pots
+     FLOP  no bet     n=149  MAE e_now 0.0312  action differs 8.7%
+     FLOP  facing bet n=135  MAE e_now 0.0246  action differs 8.1%
+     TURN  no bet     n= 85  MAE e_now 0.0266  action differs 5.9%
+     TURN  facing bet n= 61  MAE e_now 0.0253  action differs 6.6%
+     RIVER no bet     n= 46  MAE e_now 0.0206  action differs 2.2%
+     RIVER facing bet n= 24  MAE e_now 0.0155  action differs 4.2%
+old 500  : MAE e_now 0.0178  MAE e_called 0.0183  (95th pct 0.0486)  best action differs 3.2%  mean EV given up 0.0006 pots
+     FLOP  no bet     n=149  MAE e_now 0.0169  action differs 2.0%
+     FLOP  facing bet n=135  MAE e_now 0.0191  action differs 3.0%
+     TURN  no bet     n= 85  MAE e_now 0.0160  action differs 3.5%
+     TURN  facing bet n= 61  MAE e_now 0.0223  action differs 4.9%
+     RIVER no bet     n= 46  MAE e_now 0.0161  action differs 6.5%
+     RIVER facing bet n= 24  MAE e_now 0.0152  action differs 0.0%
+
+Changed decisions: EV given up vs the reference's best action (reference equity)
+new fixed: 35 changed of 500  EV lost per changed decision: mean 1.289 chips (0.0358 pots), median 0.0246 pots, max 0.1263 pots (8.92 chips); total 45.1 chips over 500 decisions
+           reference gap between its top-2 actions on changed decisions: median 0.0224 pots, share < 0.02 pots 49%, < 0.05 pots 77%
+           our own top-2 gap on changed decisions: median 0.0152 pots, max 0.1776
+           rule 'own top-2 gap < 0.01 pot': flags 9% of decisions, catches 12/35 changed decisions
+           rule 'own top-2 gap < 0.02 pot': flags 13% of decisions, catches 24/35 changed decisions
+           rule 'own top-2 gap < 0.03 pot': flags 19% of decisions, catches 28/35 changed decisions
+           rule 'own top-2 gap < 0.05 pot': flags 29% of decisions, catches 32/35 changed decisions
+old 500  : 16 changed of 500  EV lost per changed decision: mean 0.935 chips (0.0202 pots), median 0.0119 pots, max 0.0628 pots (6.78 chips); total 15.0 chips over 500 decisions
+           reference gap between its top-2 actions on changed decisions: median 0.0103 pots, share < 0.02 pots 81%, < 0.05 pots 100%
+           our own top-2 gap on changed decisions: median 0.0079 pots, max 0.0511
+           rule 'own top-2 gap < 0.01 pot': flags 7% of decisions, catches 9/16 changed decisions
+           rule 'own top-2 gap < 0.02 pot': flags 13% of decisions, catches 13/16 changed decisions
+           rule 'own top-2 gap < 0.03 pot': flags 19% of decisions, catches 15/16 changed decisions
+           rule 'own top-2 gap < 0.05 pot': flags 28% of decisions, catches 15/16 changed decisions
