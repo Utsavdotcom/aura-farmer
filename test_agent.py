@@ -556,3 +556,72 @@ def test_stats_exact_through_http_with_batched_results(bot):
     r = client.post("/hand-end", json={"results": pending}, headers=AUTH)
     assert r.status_code == 200 and r.json()["hand_end_errors"] == []
     assert _counted(module.MEMORY, start) == truth
+
+
+# ---------------------------------------------------------------------------
+# Repeatability and time safety
+# ---------------------------------------------------------------------------
+
+def _play_record(hands, seed, slow_clock=0.0):
+    """Our strategy vs a seeded random opponent; returns every action we chose.
+    slow_clock adds fake seconds to our timer each decision (a busy machine)."""
+    import strategy
+    memory = {}
+    strategy.new_half(AgentConfig(), memory)
+    opp = _random_opp(0.35, seed)
+    actions = []
+    for hand in range(hands):
+        game = Game(make_deal(seed, hand), button_seat=hand % 2, hand_index=hand)
+        while not game.is_terminal:
+            obs = game.observation(game.to_act)
+            if game.to_act == 0:
+                memory["t_used"] += slow_clock
+                action = strategy.choose_action(obs, memory)
+                actions.append(action)
+            else:
+                action = opp.choose_action(obs, {})
+            game.apply(action)
+        strategy.on_hand_end(game.hand_result(0), memory)
+    return actions, memory
+
+
+def test_same_deals_give_identical_decisions():
+    # Same deals and history -> same decisions, even if the machine is slower
+    # (as long as we stay under the time limits).
+    a, _ = _play_record(120, "repeat")
+    b, _ = _play_record(120, "repeat")
+    c, mem = _play_record(120, "repeat", slow_clock=0.0002)
+    assert a == b == c
+    assert mem["mode_counts"]["cheap"] == mem["mode_counts"]["none"] == 0
+
+
+def test_state_seeded_simulation_is_repeatable():
+    import strategy
+    obs = Game(make_deal("rng", 1), button_seat=0).observation(0)
+    x = strategy._state_rng(obs).random(5)
+    y = strategy._state_rng(obs).random(5)
+    assert (x == y).all()
+
+
+def test_projected_overrun_switches_to_cheap_then_none():
+    import strategy
+    game = Game(make_deal("cheap", 0), button_seat=0, hand_index=99)
+    game.apply(Action.CHECK_CALL)
+    game.apply(Action.CHECK_CALL)                     # now on the flop
+    obs = game.observation(game.to_act)
+    memory = {}
+    strategy.new_half(AgentConfig(), memory)
+    memory["t_used"] = 0.30                            # 100 hands: on pace for 3.0 s
+    assert strategy._num_samples(obs, memory) == strategy.SAMPLES[obs.street][0]
+    memory["t_used"] = 0.55                            # on pace for 5.5 s > 5.0
+    assert strategy._num_samples(obs, memory) == strategy.CHEAP_SAMPLES
+    memory["t_used"] = strategy.HARD_LIMIT + 0.1
+    assert strategy._num_samples(obs, memory) == 0
+    assert strategy.choose_action(obs, memory) in obs.legal_actions
+    assert memory["mode_counts"] == {"full": 1, "cheap": 1, "none": 2}
+
+
+def test_charged_estimate_adds_per_call_overhead():
+    import strategy
+    memory = {"t_used": 2.0, "calls": 1000}
+    assert strategy._charged_estimate(memory) == pytest.approx(2.0 + 1000 * strategy.OVERHEAD_PER_CALL)
