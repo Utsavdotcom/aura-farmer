@@ -195,3 +195,72 @@ def test_reads_port_from_environment():
 # ---------------------------------------------------------------------------
 # Add your own tests below, e.g. "with two aces preflop my bot raises".
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Our own tests (strategy.py, fasteval.py, preflop.py)
+# ---------------------------------------------------------------------------
+
+def test_fast_evaluator_matches_reference():
+    import numpy as np
+    from evaluator import omaha_score
+    from fasteval import best_scores
+    rng = random.Random(3)
+    holes, boards = [], []
+    for _ in range(2000):
+        cards = rng.sample(range(36), 10)
+        holes.append(cards[:5])
+        boards.append(cards[5:])
+    fast = best_scores(np.array(holes), np.array(boards))
+    for h, b, s in zip(holes, boards, fast):
+        assert s == omaha_score(h, b)
+
+
+def test_preflop_table_covers_every_hand():
+    from preflop import canon_key, load_table
+    table = load_table()
+    rng = random.Random(4)
+    for _ in range(3000):
+        assert canon_key(sorted(rng.sample(range(36), 5))) in table
+
+
+def test_out_of_time_still_legal(bot):
+    # With the time bank used up the bot must still answer legally.
+    module, client = bot
+    start_half(client)
+    module.MEMORY["t_used"] = 999.0
+    play_hands(client, 30, seed="late", raise_rate=0.5)
+
+
+def test_strategy_errors_fall_back_to_legal_action(bot, monkeypatch):
+    import strategy
+    module, client = bot
+    start_half(client)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("boom")
+    monkeypatch.setattr(strategy, "_decide", boom)
+    monkeypatch.setattr(strategy, "_learn", boom)
+    play_hands(client, 20, seed="boom")
+
+
+def test_full_half_fits_time_budget():
+    # One 1000-hand half against an aggressive random opponent, timed.
+    import time
+    import strategy
+    from game import HandResult  # noqa: F401
+    memory = {}
+    strategy.new_half(AgentConfig(), memory)
+    rng = random.Random(5)
+    start = time.perf_counter()
+    for hand in range(1000):
+        game = Game(make_deal("budget", hand), button_seat=hand % 2, hand_index=hand)
+        while not game.is_terminal:
+            obs = game.observation(game.to_act)
+            if game.to_act == 0:
+                action = strategy.choose_action(obs, memory)
+            else:
+                action = rng.choice(obs.legal_actions)
+            game.apply(action)
+        strategy.on_hand_end(game.hand_result(0), memory)
+    assert time.perf_counter() - start < 6.0
