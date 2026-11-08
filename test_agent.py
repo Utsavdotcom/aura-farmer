@@ -9,6 +9,7 @@ play with your bot. Add your own tests at the bottom!
 """
 
 import importlib.util
+import math
 import os
 import random
 import sys
@@ -661,3 +662,65 @@ def test_field_bot_legal_and_fast(bot_file):
         think += time.perf_counter() - t
     assert think / 300 * 1000 < 6.0, f"{bot_file}: {think / 300 * 1000:.2f} s per 1000 hands"
     assert slowest < 0.25, f"{bot_file}: slowest decision {slowest * 1000:.1f} ms"
+
+
+# ---------------------------------------------------------------------------
+# Range narrowing: a half-pot bet after our check is read as a stab
+# ---------------------------------------------------------------------------
+
+def _obs_after(script):
+    """Observation for whoever acts after `script` (button = seat 0, BB = seat 1)."""
+    game = Game(make_deal("range", 0), button_seat=0, hand_index=0)
+    for a in script:
+        game.apply(a)
+    return game.observation(game.to_act)
+
+
+def _post_k():
+    import strategy
+    st = strategy._new_stats()
+    return st, strategy._raise_ks(st)[1]
+
+
+def test_half_pot_bet_after_our_check_is_not_narrowed():
+    import strategy
+    from game import Street
+    st, post_k = _post_k()
+    assert post_k < 0.9                                    # narrowing would matter
+    obs = _obs_after([C, C, C, H])                         # BB checks the flop, button bets half pot
+    assert obs.street == Street.FLOP and obs.to_call > 0
+    k = 1.0 - strategy.HALF_STAB_NARROW * (1.0 - post_k)
+    assert strategy._range_fraction(obs, st) == pytest.approx(k)
+    # On the next street (we called) the same reduced factor decays as usual.
+    obs = _obs_after([C, C, C, H, C])
+    assert obs.street == Street.TURN and obs.to_call == 0
+    assert strategy._range_fraction(obs, st) == pytest.approx(max(math.sqrt(k), 0.05))
+
+
+def test_half_strength_variant(monkeypatch):
+    import strategy
+    monkeypatch.setattr(strategy, "HALF_STAB_NARROW", 0.5)
+    st, post_k = _post_k()
+    obs = _obs_after([C, C, C, H])
+    assert strategy._range_fraction(obs, st) == pytest.approx(1.0 - 0.5 * (1.0 - post_k))
+
+
+@pytest.mark.parametrize("script", [
+    [C, C, C, P],          # pot-size bet after our check: narrowed as before
+    [C, C, H],             # half-pot LEAD into us (we never checked): narrowed as before
+    [C, C, H, H],          # half-pot raise of OUR bet: narrowed as before
+])
+def test_other_bets_keep_todays_narrowing(script):
+    import strategy
+    st, post_k = _post_k()
+    obs = _obs_after(script)
+    assert obs.to_call > 0
+    assert strategy._range_fraction(obs, st) == pytest.approx(max(post_k, 0.05))
+
+
+def test_preflop_raise_narrowing_unchanged():
+    import strategy
+    st, _ = _post_k()
+    pf_k = strategy._raise_ks(st)[0]
+    obs = _obs_after([H])                                  # button raises preflop
+    assert strategy._range_fraction(obs, st) == pytest.approx(max(pf_k, 0.05))
