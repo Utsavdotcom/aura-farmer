@@ -109,6 +109,18 @@ SD_CALL_ODDS = 0.25
 # have not acted on the river): its own counter and prior weight.
 SD_LEAD_PRIOR = 0.30
 SD_LEAD_WEIGHT = 10
+# Turn/river, no bet facing us, and _mix chose to CHECK: bet instead if a bet
+# is now the best move when valued with this opponent's MEASURED fold rate to
+# our first-in bets on this street at this size (learned this half: prior
+# BET_FOLD_PRIOR worth BET_FOLD_WEIGHT bets, capped at BET_FOLD_CAP) and our
+# equity against only the best (1 - fold rate) share of its range (it folds
+# its weakest hands). Only checks become bets: every bet, its size, and every
+# decision facing a bet stay as before. The model's own fold chance for these
+# bets is ~1-4%; measured rates were 30-60% (branching replay, sim0-7).
+BET_FOLD_PRIOR = 0.30
+BET_FOLD_WEIGHT = 20
+BET_FOLD_CAP = 0.75
+BET_FOLD_STREETS = (Street.TURN, Street.RIVER)
 
 # Mixed strategy: sometimes pick a close-to-best move so we are harder to read.
 MIX_TOL = 0.06             # moves within this share of the pot of the best are "close"
@@ -137,6 +149,9 @@ def _new_stats() -> dict:
         "riv_sd": [0.0, 0],
         # Same after it leads the river with a half-pot bet and we call.
         "riv_lead_sd": [0.0, 0],
+        # Our first-in bets (no bet facing us) on the turn/river, per street and
+        # size: raw [bets, times it folded right away].
+        "bet_fold": {s: {Action.RAISE_HALF: [0, 0], Action.RAISE_POT: [0, 0]} for s in BET_FOLD_STREETS},
         # Showdown check: are the hands it raises with really stronger?
         # [sum, count] of hand strength when it raised / did not raise.
         "sd_pf_r": [0.0, 0], "sd_pf_n": [0.0, 0],
@@ -259,12 +274,16 @@ def _learn(result: HandResult, memory: dict) -> None:
     owes_me = 0
     first_pf_opp = True
     checked_to_opp = False                   # our last move this street was a check (nothing owed)
+    first_in_bet = None                      # our turn/river bet with nothing owed, awaiting its answer
     for s, is_me, act in hist:
         if s != street:
             street, owes_opp, owes_me = s, 0, 0
             checked_to_opp = False
+            first_in_bet = None
         if is_me:
             checked_to_opp = (street != Street.PREFLOP and act == Action.CHECK_CALL and not owes_me)
+            first_in_bet = (act if street in BET_FOLD_STREETS and not owes_me
+                            and act in (Action.RAISE_HALF, Action.RAISE_POT) else None)
             if owes_me and street != Street.PREFLOP:
                 st["my_faced"] += 1
                 st["my_folded"] += act == Action.FOLD
@@ -297,6 +316,11 @@ def _learn(result: HandResult, memory: dict) -> None:
             if owes_opp:
                 st["faced"] += 1
                 st["folded"] += act == Action.FOLD
+            if first_in_bet is not None:
+                bf = st["bet_fold"][street][first_in_bet]
+                bf[0] += 1
+                bf[1] += act == Action.FOLD
+                first_in_bet = None
         owes_opp = 0
 
     if result.went_to_showdown and result.opp_hole and len(result.board) == 5:
@@ -337,6 +361,12 @@ def _sd_lead_share(st: dict) -> float:
     """Smoothed showdown win share after calling its river half-pot leads this half."""
     won, n = st["riv_lead_sd"]
     return (won + SD_LEAD_PRIOR * SD_LEAD_WEIGHT) / (n + SD_LEAD_WEIGHT)
+
+
+def _bet_fold_rate(st: dict, street: Street, action: Action) -> float:
+    """Smoothed, capped fold rate to our first-in bet of this size on this street."""
+    bets, folds = st["bet_fold"][street][action]
+    return min((folds + BET_FOLD_PRIOR * BET_FOLD_WEIGHT) / (bets + BET_FOLD_WEIGHT), BET_FOLD_CAP)
 
 
 def _facing_half_lead(obs: Observation) -> bool:
@@ -551,6 +581,8 @@ def _decide(obs: Observation, memory: dict) -> Action:
     if obs.street != Street.PREFLOP and _facing_half_stab(obs) and _frequent_stabber(st, obs.street):
         ev = _wide_call(obs, ev, eq(1.0), e_called, p_fold, memory)
     action = _mix(obs, ev, e_now, memory["rng"])
+    if action == Action.CHECK_CALL and obs.to_call == 0 and obs.street in BET_FOLD_STREETS:
+        action = _measured_bet(obs, ev, e_now, sims, f, st, memory)
     if action == Action.FOLD and obs.street == Street.RIVER:
         key = None
         if _facing_half_stab(obs) and _sd_call_share(st) > SD_CALL_ODDS:
@@ -577,6 +609,40 @@ def _wide_call(obs, ev, e_wide, e_called, p_fold, memory) -> dict:
     counts = memory.setdefault("mode_counts", {})
     counts["wide_call"] = counts.get("wide_call", 0) + 1
     return ev
+
+
+def _measured_bet(obs, ev, e_now, sims, f, st, memory) -> Action:
+    """We are about to check (turn/river, nothing to call). Re-value each bet
+    with the measured fold rate and our equity vs only the hands that would
+    continue; bet if that makes a bet the best move. Otherwise keep the check."""
+    raises = [a for a in (Action.RAISE_HALF, Action.RAISE_POT) if a in ev]
+    if not raises:
+        return Action.CHECK_CALL
+    new = dict(ev)
+    for a in raises:
+        pf = _bet_fold_rate(st, obs.street, a)
+        e_called = _top_equity(sims, max(f * (1.0 - pf), 0.02))
+        new[a] = _action_evs(obs, e_now, e_called, pf)[a]
+    best_old, best_new = max(ev, key=ev.get), max(new, key=new.get)
+    if best_new in raises and best_new != best_old:
+        counts = memory.setdefault("mode_counts", {})
+        counts["fb_bet"] = counts.get("fb_bet", 0) + 1
+        return best_new
+    return Action.CHECK_CALL
+
+
+def _top_equity(sims, frac: float) -> float:
+    """Our win share vs ONLY the opponent's best `frac` of sampled hands (ranked
+    by strength on this board, as in _postflop_equity); weaker hands weigh 0."""
+    my, opp, now = sims
+    n = len(my)
+    win = (my > opp) + 0.5 * (my == opp)
+    pct = np.empty(n)
+    pct[np.argsort(now, kind="stable")] = (np.arange(n) + 0.5) / n
+    keep = pct >= 1.0 - frac
+    if not keep.any():
+        keep = pct >= pct.max()
+    return float(win[keep].mean())
 
 
 def _top2_gap(ev: dict) -> float:
