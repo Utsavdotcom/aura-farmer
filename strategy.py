@@ -82,6 +82,10 @@ PF_K_MULT = 1.4            # opponent raise rate -> share of hands it raises wit
 POST_K_MULT = 1.4
 K_FLOOR = 0.12
 HONESTY_PRIOR = 6          # showdowns before we fully trust the honesty check
+# A half-pot bet after we check is mostly a cheap stab (measured against the
+# actual cards: we were ahead far more often than the narrowed range said),
+# so it narrows the range less than other bets: 0 = not at all, 1 = as usual.
+HALF_STAB_NARROW = 0.0
 
 # Mixed strategy: sometimes pick a close-to-best move so we are harder to read.
 MIX_TOL = 0.06             # moves within this share of the pot of the best are "close"
@@ -343,20 +347,30 @@ def _range_fraction(obs: Observation, st: dict) -> float:
     call_k = min(max(1.0 - _rate(st, "folded", "faced"), 0.4), 1.0)
     f = 1.0
     my_bet_pending = False
+    we_checked = False          # our last move was a check after the flop (not a call)
+    opp_bet_pending = False
+    street = None
     for a in obs.action_history:
+        if a.street != street:
+            street, we_checked, opp_bet_pending = a.street, False, False
         if a.is_me:
             my_bet_pending = a.action in (Action.RAISE_HALF, Action.RAISE_POT)
+            we_checked = (a.street != Street.PREFLOP and a.action == Action.CHECK_CALL
+                          and not opp_bet_pending)
+            opp_bet_pending = False
             continue
         if a.action in (Action.RAISE_HALF, Action.RAISE_POT):
+            opp_bet_pending = True
             if a.street == Street.PREFLOP:
                 f *= pf_k
-            elif a.street == obs.street:
-                f *= post_k
             else:
-                f *= math.sqrt(post_k)
+                k = post_k
+                if we_checked and a.action == Action.RAISE_HALF:
+                    k = 1.0 - HALF_STAB_NARROW * (1.0 - post_k)   # half-pot stab after our check
+                f *= k if a.street == obs.street else math.sqrt(k)
         elif a.action == Action.CHECK_CALL and my_bet_pending and a.street != Street.PREFLOP:
             f *= call_k
-        my_bet_pending = False
+        my_bet_pending = we_checked = False
     return max(f, 0.05)
 
 
