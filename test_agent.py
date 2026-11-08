@@ -917,3 +917,101 @@ def test_decide_uses_whole_range_for_the_call_only(monkeypatch, kind):
             assert on == off
         changed += on[Action.CHECK_CALL] > off[Action.CHECK_CALL] + 1e-9
     assert changed > 0
+
+
+# ---------------------------------------------------------------------------
+# River showdown-calibrated calls vs half-pot stabs (fix #2)
+# ---------------------------------------------------------------------------
+
+def _true_river_sd(history, me, result):
+    """From the engine log: did we check the river, face a half-pot bet and call,
+    and the hand went to showdown? Returns [win share, 1] or [0, 0]."""
+    from game import Street
+    if not result.went_to_showdown:
+        return [0.0, 0]
+    r = [(rec.seat == me, rec.action) for rec in history if rec.street == Street.RIVER]
+    for i in range(len(r) - 2):
+        our_check = r[i] == (True, Action.CHECK_CALL) and (i == 0 or r[i - 1] == (False, Action.CHECK_CALL))
+        if our_check and r[i + 1] == (False, H) and r[i + 2] == (True, C):
+            return [{"me": 1.0, "split": 0.5}.get(result.winner, 0.0), 1]
+    return [0.0, 0]
+
+
+@pytest.mark.parametrize("opp_name", ["random_aggro", "learner", "lag", "tag"])
+def test_river_sd_counter_matches_engine_log(opp_name):
+    import strategy
+    opp = _random_opp(0.5, opp_name) if opp_name.startswith("random") else _sparring(opp_name)
+    memory, opp_mem = {}, {}
+    strategy.new_half(AgentConfig(), memory)
+    opp.new_half(AgentConfig(), opp_mem)
+    counted = 0
+    for hand in range(300):
+        me = (hand // 2) % 2
+        game = Game(make_deal("rivsd-" + opp_name, hand), button_seat=hand % 2, hand_index=hand)
+        while not game.is_terminal:
+            obs = game.observation(game.to_act)
+            mem = memory if game.to_act == me else opp_mem
+            game.apply((strategy if game.to_act == me else opp).choose_action(obs, mem))
+        before = list(memory["stats"]["riv_sd"])
+        res = game.hand_result(me)
+        strategy.on_hand_end(res, memory)
+        opp.on_hand_end(game.hand_result(1 - me), opp_mem)
+        after = memory["stats"]["riv_sd"]
+        want = _true_river_sd(game.result().history, me, res)
+        assert [after[0] - before[0], after[1] - before[1]] == want, (hand, game.result().history)
+        counted += want[1]
+    assert counted > 0
+
+
+def test_river_sd_counted_in_scripted_hands(monkeypatch):
+    # BB: checks every street; the button checks the flop and turn, bets half on the river, we call.
+    _, mem, g = _scripted([C, C, C, C, C, C, C, H, C], me_button=False, monkeypatch=monkeypatch)
+    assert g.result().went_to_showdown
+    assert mem["stats"]["riv_sd"][1] == 1
+    assert mem["stats"]["riv_sd"][0] in (0.0, 0.5, 1.0)
+    # Pot-size river bet: not counted.
+    _, mem, _ = _scripted([C, C, C, C, C, C, C, P, C], me_button=False, monkeypatch=monkeypatch)
+    assert mem["stats"]["riv_sd"] == [0.0, 0]
+    # Half-pot LEAD on the river (we never checked): not counted.
+    _, mem, _ = _scripted([C, C, C, C, C, C, H, C], me_button=True, monkeypatch=monkeypatch)
+    assert mem["stats"]["riv_sd"] == [0.0, 0]
+    # Turn half-pot stab called, river checked through: not counted.
+    _, mem, _ = _scripted([C, C, C, C, C, H, C, C, C], me_button=False, monkeypatch=monkeypatch)
+    assert mem["stats"]["riv_sd"] == [0.0, 0]
+    # We fold to it: no showdown, nothing counted.
+    _, mem, _ = _scripted([C, C, C, C, C, C, C, H, F], me_button=False, monkeypatch=monkeypatch)
+    assert mem["stats"]["riv_sd"] == [0.0, 0]
+
+
+def test_sd_call_share_smoothing():
+    import strategy
+    st = strategy._new_stats()
+    assert strategy._sd_call_share(st) == pytest.approx(strategy.SD_CALL_PRIOR)
+    st["riv_sd"] = [2.0, 10]                      # 20% realized, 10 showdowns
+    want = (2.0 + 0.30 * 20) / (10 + 20)
+    assert strategy._sd_call_share(st) == pytest.approx(want)
+    st["riv_sd"] = [0.0, 1000]
+    assert strategy._sd_call_share(st) == pytest.approx(0.0, abs=0.01)
+
+
+@pytest.mark.parametrize("script,riv_sd,want", [
+    ([C, C, C, C, C, C, C, H], [0.0, 0], Action.CHECK_CALL),     # river stab, prior 0.30 > 0.25: call
+    ([C, C, C, C, C, C, C, H], [0.0, 100], Action.FOLD),         # share 0.05: keep folding
+    ([C, C, C, C, C, C, C, H], [30.0, 100], Action.CHECK_CALL),  # share 0.30: call
+    ([C, C, C, C, C, C, C, P], [0.0, 0], Action.FOLD),           # pot-size bet: untouched
+    ([C, C, C, C, C, H], [0.0, 0], Action.FOLD),                 # turn stab: untouched
+    ([C, C, C, C, C, C, H], [0.0, 0], Action.FOLD),              # river half-pot lead: untouched
+])
+def test_sd_call_only_turns_river_stab_folds_into_calls(monkeypatch, script, riv_sd, want):
+    import strategy
+    monkeypatch.setattr(strategy, "_mix", lambda obs, ev, e_now, rng: Action.FOLD)
+    obs = _obs_after(script)
+    assert obs.to_call > 0
+    mem = {}
+    strategy.new_half(AgentConfig(), mem)
+    mem["stats"]["riv_sd"] = list(riv_sd)
+    assert strategy._decide(obs, mem) == want
+    assert mem.get("mode_counts", {}).get("sd_call", 0) == (want == Action.CHECK_CALL)
+    # A call or raise from _mix is never changed.
+    monkeypatch.setattr(strategy, "_mix", lambda obs, ev, e_now, rng: Action.RAISE_POT)
+    assert strategy._decide(obs, mem) == Action.RAISE_POT
