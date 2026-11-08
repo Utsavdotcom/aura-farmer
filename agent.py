@@ -39,8 +39,8 @@ from game import Action, AgentConfig, HandResult, Observation, Street
 warmup()
 
 # rename as your team/bot's name
-PARTICIPANT = "aayush64x"
-AGENT_NAME = "ShortStack"
+PARTICIPANT = "Team AURA"
+AGENT_NAME = "Aura-Farmer"
 
 
 # ===== YOUR CODE HERE =====
