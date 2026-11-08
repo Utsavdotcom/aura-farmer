@@ -724,3 +724,130 @@ def test_preflop_raise_narrowing_unchanged():
     pf_k = strategy._raise_ks(st)[0]
     obs = _obs_after([H])                                  # button raises preflop
     assert strategy._range_fraction(obs, st) == pytest.approx(max(pf_k, 0.05))
+
+
+# ---------------------------------------------------------------------------
+# Frequency gate: how often the opponent bets when we check to it (per street),
+# and the whole-range read of half-pot stabs from frequent stabbers
+# ---------------------------------------------------------------------------
+
+def _true_checkbets(history, me):
+    """From the engine log: per postflop street, [bets, chances] where a
+    chance is an opponent action right after OUR check (a check that did not
+    face a bet) on the same street. Written independently of strategy._learn."""
+    out = {s: [0, 0] for s in (1, 2, 3)}
+    for i, rec in enumerate(history):
+        if rec.seat == me or rec.street == 0 or not i:
+            continue
+        prev = history[i - 1]
+        if prev.street != rec.street or prev.seat != me or prev.action != C:
+            continue
+        before = history[i - 2] if i >= 2 and history[i - 2].street == rec.street else None
+        if before is not None and before.action in (H, P):
+            continue                    # our CHECK_CALL was a call, not a check
+        out[int(rec.street)][0] += rec.action in (H, P)
+        out[int(rec.street)][1] += 1
+    return out
+
+
+def _checkbet_counts(memory):
+    return {int(s): list(v) for s, v in memory["stats"]["chk_bet"].items()}
+
+
+@pytest.mark.parametrize("opp_name,skip", [("random_aggro", 0.0), ("learner", 0.0), ("lag", 0.0),
+                                           ("nit", 0.0), ("random_skip", 0.15)])
+def test_checkbet_counts_match_engine_log(opp_name, skip):
+    import strategy
+    from game import default_action
+    opp = _random_opp(0.5, opp_name) if opp_name.startswith("random") else _sparring(opp_name)
+    memory, opp_mem = {}, {}
+    strategy.new_half(AgentConfig(), memory)
+    opp.new_half(AgentConfig(), opp_mem)
+    rng = random.Random(opp_name)
+    chances = 0
+    for hand in range(300):
+        me = (hand // 2) % 2
+        game = Game(make_deal("chk-" + opp_name, hand), button_seat=hand % 2, hand_index=hand)
+        skipped = False
+        while not game.is_terminal:
+            obs = game.observation(game.to_act)
+            if game.to_act == me:
+                if rng.random() < skip:
+                    action, skipped = default_action(obs.to_call), True
+                else:
+                    action = strategy.choose_action(obs, memory)
+            else:
+                action = opp.choose_action(obs, opp_mem)
+            game.apply(action)
+        before = _checkbet_counts(memory)
+        strategy.on_hand_end(game.hand_result(me), memory)
+        opp.on_hand_end(game.hand_result(1 - me), opp_mem)
+        after = _checkbet_counts(memory)
+        got = {s: [after[s][0] - before[s][0], after[s][1] - before[s][1]] for s in after}
+        want = _true_checkbets(game.result().history, me)
+        chances += sum(v[1] for v in want.values())
+        if skipped:                     # partial record: may miss, never invent
+            assert all(got[s][0] <= want[s][0] and got[s][1] <= want[s][1] for s in got), (hand, got, want)
+        else:
+            assert got == want, (hand, got, want, game.result().history)
+    assert chances > 30
+
+
+def test_checkbet_counted_in_scripted_hands(monkeypatch):
+    from game import Street
+    # We are BB: check the flop, the button bets, we fold.
+    _, mem, _ = _scripted([C, C, C, H, F], me_button=False, monkeypatch=monkeypatch)
+    assert mem["stats"]["chk_bet"][Street.FLOP] == [1, 1]
+    # We are BB: check every street; the button checks behind each time
+    # (the river check is inferred from the showdown).
+    _, mem, _ = _scripted([C] * 8, me_button=False, monkeypatch=monkeypatch)
+    for s in (Street.FLOP, Street.TURN, Street.RIVER):
+        assert mem["stats"]["chk_bet"][s] == [0, 1]
+    # The button checks first and we bet: not a chance for it after our check.
+    _, mem, _ = _scripted([C, C, C, H, F], me_button=True, monkeypatch=monkeypatch)
+    assert mem["stats"]["chk_bet"][Street.FLOP] == [0, 0]
+
+
+@pytest.mark.parametrize("bets,chances,whole", [
+    (20, 20, True),        # bets every time, enough chances: whole range
+    (10, 20, True),        # exactly at the threshold (0.50)
+    (9, 20, False),        # just below the threshold
+    (19, 19, False),       # too few chances this half
+    (0, 0, False),         # nothing seen yet
+])
+def test_half_pot_stab_whole_range_only_for_frequent_stabbers(bets, chances, whole):
+    import strategy
+    from game import Street
+    assert strategy.STAB_GATE_RATE == 0.50 and strategy.STAB_GATE_MIN == 20
+    st, _ = _post_k()
+    pf_k = strategy._raise_ks(st)[0]
+    assert pf_k < 0.9                                      # preflop narrowing would matter
+    st["chk_bet"][Street.FLOP] = [bets, chances]
+    obs = _obs_after([H, C, C, H])                         # button raised preflop, BB checks flop, button bets half
+    assert obs.street == Street.FLOP and obs.to_call > 0
+    want = 1.0 if whole else max(pf_k, 0.05)               # A: only this bet is not narrowed
+    assert strategy._range_fraction(obs, st) == pytest.approx(want)
+
+
+def test_stab_gate_is_per_street():
+    import strategy
+    from game import Street
+    st, _ = _post_k()
+    pf_k = strategy._raise_ks(st)[0]
+    st["chk_bet"][Street.TURN] = [30, 30]                  # frequent on the turn only
+    obs = _obs_after([H, C, C, H])                         # facing a flop stab
+    assert strategy._range_fraction(obs, st) == pytest.approx(max(pf_k, 0.05))
+
+
+def test_stab_gate_leaves_pot_bets_and_later_decisions_alone():
+    import strategy
+    from game import Street
+    st, post_k = _post_k()
+    pf_k = strategy._raise_ks(st)[0]
+    for s in (Street.FLOP, Street.TURN, Street.RIVER):
+        st["chk_bet"][s] = [40, 40]
+    obs = _obs_after([H, C, C, P])                         # POT bet after our check: full narrowing
+    assert strategy._range_fraction(obs, st) == pytest.approx(max(pf_k * post_k, 0.05))
+    obs = _obs_after([H, C, C, H, C])                      # we called the stab: turn, nothing to face
+    assert obs.street == Street.TURN and obs.to_call == 0
+    assert strategy._range_fraction(obs, st) == pytest.approx(max(pf_k, 0.05))

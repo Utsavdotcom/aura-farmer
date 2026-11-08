@@ -86,6 +86,13 @@ HONESTY_PRIOR = 6          # showdowns before we fully trust the honesty check
 # actual cards: we were ahead far more often than the narrowed range said),
 # so it narrows the range less than other bets: 0 = not at all, 1 = as usual.
 HALF_STAB_NARROW = 0.0
+# Against an opponent that bets most of the times we check to it on this street
+# (raw rate >= STAB_GATE_RATE over >= STAB_GATE_MIN chances this half), judge
+# our hand facing such a stab against its WHOLE range (no narrowing at all).
+# The threshold sits in the gap between tight bettors (nit, tag, F1: <= 42%)
+# and loose ones (lag, learner, F4, PR #2: >= 55%) measured on sim seeds.
+STAB_GATE_RATE = 0.50
+STAB_GATE_MIN = 20
 
 # Mixed strategy: sometimes pick a close-to-best move so we are harder to read.
 MIX_TOL = 0.06             # moves within this share of the pot of the best are "close"
@@ -107,6 +114,8 @@ def _new_stats() -> dict:
         "faced": 10.0, "folded": 3.0,        # opponent fold rate when we bet/raise
         "pf_faced": 6.0, "pf_folded": 1.5,   # same, preflop only
         "my_faced": 10.0, "my_folded": 4.0,  # how often WE fold to its postflop bets
+        # How often it bets when we check to it, per street: raw [bets, chances].
+        "chk_bet": {s: [0, 0] for s in (Street.FLOP, Street.TURN, Street.RIVER)},
         # Showdown check: are the hands it raises with really stronger?
         # [sum, count] of hand strength when it raised / did not raise.
         "sd_pf_r": [0.0, 0], "sd_pf_n": [0.0, 0],
@@ -228,10 +237,13 @@ def _learn(result: HandResult, memory: dict) -> None:
     owes_opp = 1 if not is_button else 0     # preflop: the button (SB) owes 1
     owes_me = 0
     first_pf_opp = True
+    checked_to_opp = False                   # our last move this street was a check (nothing owed)
     for s, is_me, act in hist:
         if s != street:
             street, owes_opp, owes_me = s, 0, 0
+            checked_to_opp = False
         if is_me:
+            checked_to_opp = (street != Street.PREFLOP and act == Action.CHECK_CALL and not owes_me)
             if owes_me and street != Street.PREFLOP:
                 st["my_faced"] += 1
                 st["my_folded"] += act == Action.FOLD
@@ -255,6 +267,11 @@ def _learn(result: HandResult, memory: dict) -> None:
         else:
             st["post_dec"] += 1
             st["post_raise"] += raised
+            if checked_to_opp and not owes_opp:
+                cb = st["chk_bet"][street]
+                cb[0] += raised
+                cb[1] += 1
+            checked_to_opp = False
             if owes_opp:
                 st["faced"] += 1
                 st["folded"] += act == Action.FOLD
@@ -350,7 +367,9 @@ def _range_fraction(obs: Observation, st: dict) -> float:
     we_checked = False          # our last move was a check after the flop (not a call)
     opp_bet_pending = False
     street = None
+    facing_stab = False         # the move we now face is a half-pot stab after our check
     for a in obs.action_history:
+        facing_stab = False
         if a.street != street:
             street, we_checked, opp_bet_pending = a.street, False, False
         if a.is_me:
@@ -367,11 +386,21 @@ def _range_fraction(obs: Observation, st: dict) -> float:
                 k = post_k
                 if we_checked and a.action == Action.RAISE_HALF:
                     k = 1.0 - HALF_STAB_NARROW * (1.0 - post_k)   # half-pot stab after our check
+                    facing_stab = a.street == obs.street
                 f *= k if a.street == obs.street else math.sqrt(k)
         elif a.action == Action.CHECK_CALL and my_bet_pending and a.street != Street.PREFLOP:
             f *= call_k
         my_bet_pending = we_checked = False
+    if facing_stab and obs.to_call > 0 and _frequent_stabber(st, obs.street):
+        return 1.0
     return max(f, 0.05)
+
+
+def _frequent_stabber(st: dict, street: Street) -> bool:
+    """Does it bet at least STAB_GATE_RATE of the times we check to it on
+    `street` (raw count, at least STAB_GATE_MIN chances this half)?"""
+    bets, chances = st["chk_bet"][street]
+    return chances >= STAB_GATE_MIN and bets >= STAB_GATE_RATE * chances
 
 
 def _num_samples(obs: Observation, memory: dict) -> int:
