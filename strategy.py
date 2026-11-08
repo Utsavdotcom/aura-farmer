@@ -105,6 +105,10 @@ STAB_GATE_MIN = 20
 SD_CALL_PRIOR = 0.30
 SD_CALL_WEIGHT = 20
 SD_CALL_ODDS = 0.25
+# Same idea when it LEADS the river with a half-pot bet (we are the button and
+# have not acted on the river): its own counter and prior weight.
+SD_LEAD_PRIOR = 0.30
+SD_LEAD_WEIGHT = 10
 
 # Mixed strategy: sometimes pick a close-to-best move so we are harder to read.
 MIX_TOL = 0.06             # moves within this share of the pot of the best are "close"
@@ -131,6 +135,8 @@ def _new_stats() -> dict:
         # Showdowns after we check the river, it bets half pot and we call:
         # raw [sum of our win shares (1 / 0.5 / 0), count].
         "riv_sd": [0.0, 0],
+        # Same after it leads the river with a half-pot bet and we call.
+        "riv_lead_sd": [0.0, 0],
         # Showdown check: are the hands it raises with really stronger?
         # [sum, count] of hand strength when it raised / did not raise.
         "sd_pf_r": [0.0, 0], "sd_pf_n": [0.0, 0],
@@ -295,9 +301,13 @@ def _learn(result: HandResult, memory: dict) -> None:
 
     if result.went_to_showdown and result.opp_hole and len(result.board) == 5:
         _learn_showdown(result, hist, memory)
+        share = {"me": 1.0, "split": 0.5}.get(result.winner, 0.0)
         if _called_river_half_stab(hist):
-            st["riv_sd"][0] += {"me": 1.0, "split": 0.5}.get(result.winner, 0.0)
+            st["riv_sd"][0] += share
             st["riv_sd"][1] += 1
+        if _called_river_half_lead(hist):
+            st["riv_lead_sd"][0] += share
+            st["riv_lead_sd"][1] += 1
 
 
 def _called_river_half_stab(hist: list) -> bool:
@@ -311,10 +321,30 @@ def _called_river_half_stab(hist: list) -> bool:
     return False
 
 
+def _called_river_half_lead(hist: list) -> bool:
+    """On the river it bet half pot before we acted and we called."""
+    r = [(is_me, a) for s, is_me, a in hist if s == Street.RIVER]
+    return len(r) >= 2 and r[0] == (False, Action.RAISE_HALF) and r[1] == (True, Action.CHECK_CALL)
+
+
 def _sd_call_share(st: dict) -> float:
     """Smoothed showdown win share after calling river half-pot stabs this half."""
     won, n = st["riv_sd"]
     return (won + SD_CALL_PRIOR * SD_CALL_WEIGHT) / (n + SD_CALL_WEIGHT)
+
+
+def _sd_lead_share(st: dict) -> float:
+    """Smoothed showdown win share after calling its river half-pot leads this half."""
+    won, n = st["riv_lead_sd"]
+    return (won + SD_LEAD_PRIOR * SD_LEAD_WEIGHT) / (n + SD_LEAD_WEIGHT)
+
+
+def _facing_half_lead(obs: Observation) -> bool:
+    """It bet half pot on the river before we acted on the river: we face it now."""
+    h = obs.action_history
+    return (obs.street == Street.RIVER and obs.to_call > 0 and len(h) >= 1
+            and not h[-1].is_me and h[-1].action == Action.RAISE_HALF and h[-1].street == Street.RIVER
+            and not any(a.is_me and a.street == Street.RIVER for a in h))
 
 
 def _hand_ending_opp_actions(hist: list, result: HandResult, pots) -> list:
@@ -521,11 +551,16 @@ def _decide(obs: Observation, memory: dict) -> Action:
     if obs.street != Street.PREFLOP and _facing_half_stab(obs) and _frequent_stabber(st, obs.street):
         ev = _wide_call(obs, ev, eq(1.0), e_called, p_fold, memory)
     action = _mix(obs, ev, e_now, memory["rng"])
-    if (action == Action.FOLD and obs.street == Street.RIVER and _facing_half_stab(obs)
-            and _sd_call_share(st) > SD_CALL_ODDS):
-        action = Action.CHECK_CALL
-        counts = memory.setdefault("mode_counts", {})
-        counts["sd_call"] = counts.get("sd_call", 0) + 1
+    if action == Action.FOLD and obs.street == Street.RIVER:
+        key = None
+        if _facing_half_stab(obs) and _sd_call_share(st) > SD_CALL_ODDS:
+            key = "sd_call"
+        elif _facing_half_lead(obs) and _sd_lead_share(st) > SD_CALL_ODDS:
+            key = "sd_lead_call"
+        if key is not None:
+            action = Action.CHECK_CALL
+            counts = memory.setdefault("mode_counts", {})
+            counts[key] = counts.get(key, 0) + 1
     return action
 
 
