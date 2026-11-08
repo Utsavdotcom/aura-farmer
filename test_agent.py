@@ -700,7 +700,6 @@ def test_half_pot_bet_after_our_check_is_not_narrowed():
 def test_half_strength_variant(monkeypatch):
     import strategy
     monkeypatch.setattr(strategy, "HALF_STAB_NARROW", 0.5)
-    monkeypatch.setattr(strategy, "STAB_WHOLE_RANGE", False)
     st, post_k = _post_k()
     obs = _obs_after([C, C, C, H])
     assert strategy._range_fraction(obs, st) == pytest.approx(1.0 - 0.5 * (1.0 - post_k))
@@ -725,46 +724,3 @@ def test_preflop_raise_narrowing_unchanged():
     pf_k = strategy._raise_ks(st)[0]
     obs = _obs_after([H])                                  # button raises preflop
     assert strategy._range_fraction(obs, st) == pytest.approx(max(pf_k, 0.05))
-
-
-# Version B: facing a half-pot stab after our check, judge against the whole range
-
-def test_facing_half_pot_stab_uses_whole_range_despite_preflop_raise():
-    import strategy
-    st, _ = _post_k()
-    pf_k = strategy._raise_ks(st)[0]
-    assert pf_k < 0.9                                      # preflop narrowing would matter
-    obs = _obs_after([H, C, C, H])                         # button raised preflop, BB checks flop, button bets half
-    assert obs.to_call > 0
-    assert strategy._range_fraction(obs, st) == pytest.approx(1.0)
-
-
-def test_whole_range_switch_off_keeps_preflop_narrowing(monkeypatch):
-    import strategy
-    monkeypatch.setattr(strategy, "STAB_WHOLE_RANGE", False)
-    st, _ = _post_k()
-    pf_k = strategy._raise_ks(st)[0]
-    obs = _obs_after([H, C, C, H])
-    assert strategy._range_fraction(obs, st) == pytest.approx(max(pf_k, 0.05))
-
-
-def test_pot_bet_after_check_keeps_all_narrowing():
-    import strategy
-    st, post_k = _post_k()
-    pf_k = strategy._raise_ks(st)[0]
-    obs = _obs_after([H, C, C, P])                         # pot-size bet after our check
-    assert obs.to_call > 0
-    assert strategy._range_fraction(obs, st) == pytest.approx(max(pf_k * post_k, 0.05))
-
-
-def test_whole_range_only_while_facing_the_stab():
-    import strategy
-    from game import Street
-    st, _ = _post_k()
-    pf_k = strategy._raise_ks(st)[0]
-    obs = _obs_after([H, C, C, H, C])                      # we called the stab: next street, nothing to face
-    assert obs.street == Street.TURN and obs.to_call == 0
-    assert strategy._range_fraction(obs, st) == pytest.approx(max(pf_k, 0.05))
-    obs = _obs_after([H, C, C, H, C, C, P])                # then check, and it bets pot on the turn
-    assert obs.to_call > 0
-    assert strategy._range_fraction(obs, st) == pytest.approx(max(pf_k * strategy._raise_ks(st)[1], 0.05))
