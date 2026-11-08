@@ -92,8 +92,8 @@ HALF_STAB_NARROW = 0.0
 # range. Raise EVs keep today's narrowed equity, and if a raise is already
 # the best move nothing changes: the whole-range read only turns folds into
 # calls. Gate "any": all its bets count (threshold in the sim-seed gap between
-# nit/tag/F1 <= 42% and lag/learner/F4/PR #2 >= 55%). Gate "half": only its
-# half-pot bets count (gap: nit/tag/F1 <= 18.4%, learner/lag/F4/PR #2 >= 27.3%).
+# nit/tag/F1 <= 42% and lag/learner/F4 >= 55%). Gate "half": only its
+# half-pot bets count (gap: nit/tag/F1 <= 18.4%, learner/lag/F4 >= 27.3%).
 STAB_GATE_KIND = "any"
 STAB_GATE_RATES = {"any": 0.50, "half": 0.23}
 STAB_GATE_MIN = 20
@@ -101,7 +101,7 @@ STAB_GATE_MIN = 20
 # instead when our smoothed showdown win share after calling such bets this
 # half (prior SD_CALL_PRIOR worth SD_CALL_WEIGHT showdowns) beats the 25% pot
 # odds. Measured on sim seeds against the real cards: our folds there were
-# wrong more often than not vs jish4, PR #2, F4 and learner.
+# wrong more often than not vs the aggressive field opponents (F4, learner).
 SD_CALL_PRIOR = 0.30
 SD_CALL_WEIGHT = 20
 SD_CALL_ODDS = 0.25
