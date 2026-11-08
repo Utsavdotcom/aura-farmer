@@ -86,6 +86,10 @@ HONESTY_PRIOR = 6          # showdowns before we fully trust the honesty check
 # actual cards: we were ahead far more often than the narrowed range said),
 # so it narrows the range less than other bets: 0 = not at all, 1 = as usual.
 HALF_STAB_NARROW = 0.0
+# Facing such a stab, judge our hand against the opponent's WHOLE range: its
+# stabs are so wide that even earlier narrowing (preflop raises, earlier bets)
+# made us fold winners. Pot-size bets keep the usual narrowing.
+STAB_WHOLE_RANGE = True
 
 # Mixed strategy: sometimes pick a close-to-best move so we are harder to read.
 MIX_TOL = 0.06             # moves within this share of the pot of the best are "close"
@@ -350,7 +354,9 @@ def _range_fraction(obs: Observation, st: dict) -> float:
     we_checked = False          # our last move was a check after the flop (not a call)
     opp_bet_pending = False
     street = None
+    facing_stab = False         # the move we now face is a half-pot stab after our check
     for a in obs.action_history:
+        facing_stab = False
         if a.street != street:
             street, we_checked, opp_bet_pending = a.street, False, False
         if a.is_me:
@@ -367,10 +373,13 @@ def _range_fraction(obs: Observation, st: dict) -> float:
                 k = post_k
                 if we_checked and a.action == Action.RAISE_HALF:
                     k = 1.0 - HALF_STAB_NARROW * (1.0 - post_k)   # half-pot stab after our check
+                    facing_stab = a.street == obs.street
                 f *= k if a.street == obs.street else math.sqrt(k)
         elif a.action == Action.CHECK_CALL and my_bet_pending and a.street != Street.PREFLOP:
             f *= call_k
         my_bet_pending = we_checked = False
+    if facing_stab and STAB_WHOLE_RANGE and obs.to_call > 0:
+        return 1.0
     return max(f, 0.05)
 
 
