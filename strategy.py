@@ -86,6 +86,17 @@ HONESTY_PRIOR = 6          # showdowns before we fully trust the honesty check
 # actual cards: we were ahead far more often than the narrowed range said),
 # so it narrows the range less than other bets: 0 = not at all, 1 = as usual.
 HALF_STAB_NARROW = 0.0
+# Facing a half-pot bet after our check from an opponent that bets often when
+# we check to it on this street (raw rate >= the gate over >= STAB_GATE_MIN
+# chances this half), decide FOLD vs CALL with our equity against its WHOLE
+# range. Raise EVs keep today's narrowed equity, and if a raise is already
+# the best move nothing changes: the whole-range read only turns folds into
+# calls. Gate "any": all its bets count (threshold in the sim-seed gap between
+# nit/tag/F1 <= 42% and lag/learner/F4/PR #2 >= 55%). Gate "half": only its
+# half-pot bets count (gap: nit/tag/F1 <= 18.4%, learner/lag/F4/PR #2 >= 27.3%).
+STAB_GATE_KIND = "any"
+STAB_GATE_RATES = {"any": 0.50, "half": 0.23}
+STAB_GATE_MIN = 20
 
 # Mixed strategy: sometimes pick a close-to-best move so we are harder to read.
 MIX_TOL = 0.06             # moves within this share of the pot of the best are "close"
@@ -107,6 +118,8 @@ def _new_stats() -> dict:
         "faced": 10.0, "folded": 3.0,        # opponent fold rate when we bet/raise
         "pf_faced": 6.0, "pf_folded": 1.5,   # same, preflop only
         "my_faced": 10.0, "my_folded": 4.0,  # how often WE fold to its postflop bets
+        # When we check to it, per street: raw [bets, half-pot bets, chances].
+        "chk_bet": {s: [0, 0, 0] for s in (Street.FLOP, Street.TURN, Street.RIVER)},
         # Showdown check: are the hands it raises with really stronger?
         # [sum, count] of hand strength when it raised / did not raise.
         "sd_pf_r": [0.0, 0], "sd_pf_n": [0.0, 0],
@@ -228,10 +241,13 @@ def _learn(result: HandResult, memory: dict) -> None:
     owes_opp = 1 if not is_button else 0     # preflop: the button (SB) owes 1
     owes_me = 0
     first_pf_opp = True
+    checked_to_opp = False                   # our last move this street was a check (nothing owed)
     for s, is_me, act in hist:
         if s != street:
             street, owes_opp, owes_me = s, 0, 0
+            checked_to_opp = False
         if is_me:
+            checked_to_opp = (street != Street.PREFLOP and act == Action.CHECK_CALL and not owes_me)
             if owes_me and street != Street.PREFLOP:
                 st["my_faced"] += 1
                 st["my_folded"] += act == Action.FOLD
@@ -255,6 +271,12 @@ def _learn(result: HandResult, memory: dict) -> None:
         else:
             st["post_dec"] += 1
             st["post_raise"] += raised
+            if checked_to_opp and not owes_opp:
+                cb = st["chk_bet"][street]
+                cb[0] += raised
+                cb[1] += act == Action.RAISE_HALF
+                cb[2] += 1
+            checked_to_opp = False
             if owes_opp:
                 st["faced"] += 1
                 st["folded"] += act == Action.FOLD
@@ -374,6 +396,23 @@ def _range_fraction(obs: Observation, st: dict) -> float:
     return max(f, 0.05)
 
 
+def _facing_half_stab(obs: Observation) -> bool:
+    """We checked on this street after the flop and it bet half pot: we face it now."""
+    h = obs.action_history
+    return (obs.street != Street.PREFLOP and obs.to_call > 0 and len(h) >= 2
+            and not h[-1].is_me and h[-1].action == Action.RAISE_HALF and h[-1].street == obs.street
+            and h[-2].is_me and h[-2].action == Action.CHECK_CALL and h[-2].street == obs.street)
+
+
+def _frequent_stabber(st: dict, street: Street) -> bool:
+    """Does it bet (gate "any") or bet half pot (gate "half") at least the gate
+    share of the times we check to it on `street` (raw counts, at least
+    STAB_GATE_MIN chances this half)?"""
+    bets, half, chances = st["chk_bet"][street]
+    n = bets if STAB_GATE_KIND == "any" else half
+    return chances >= STAB_GATE_MIN and n >= STAB_GATE_RATES[STAB_GATE_KIND] * chances
+
+
 def _num_samples(obs: Observation, memory: dict) -> int:
     """Fixed sample count for this street and situation. Only if this half is
     on course to use too much of the time bank (a slow machine) do we drop to
@@ -448,7 +487,24 @@ def _decide(obs: Observation, memory: dict) -> Action:
             counts = memory.setdefault("mode_counts", {})
             counts["resampled"] = counts.get("resampled", 0) + 1
     ev = _action_evs(obs, e_now, e_called, p_fold)
+    if obs.street != Street.PREFLOP and _facing_half_stab(obs) and _frequent_stabber(st, obs.street):
+        ev = _wide_call(obs, ev, eq(1.0), e_called, p_fold, memory)
     return _mix(obs, ev, e_now, memory["rng"])
+
+
+def _wide_call(obs, ev, e_wide, e_called, p_fold, memory) -> dict:
+    """Facing a frequent stabber's half-pot bet: value the CALL with our equity
+    against its whole range. Raise EVs stay narrowed, and if a raise is already
+    best nothing changes (this only turns folds into calls)."""
+    best = max(ev, key=ev.get)
+    if best in (Action.RAISE_HALF, Action.RAISE_POT) or Action.CHECK_CALL not in ev:
+        return ev
+    ev = dict(ev)
+    ev[Action.CHECK_CALL] = max(ev[Action.CHECK_CALL],
+                                _action_evs(obs, e_wide, e_called, p_fold)[Action.CHECK_CALL])
+    counts = memory.setdefault("mode_counts", {})
+    counts["wide_call"] = counts.get("wide_call", 0) + 1
+    return ev
 
 
 def _top2_gap(ev: dict) -> float:
