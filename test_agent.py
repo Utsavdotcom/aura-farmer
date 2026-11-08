@@ -1106,3 +1106,194 @@ def test_sd_lead_call_only_turns_river_lead_folds_into_calls(monkeypatch, script
     assert mem.get("mode_counts", {}).get("sd_lead_call", 0) == (want == Action.CHECK_CALL)
     monkeypatch.setattr(strategy, "_mix", lambda obs, ev, e_now, rng: Action.CHECK_CALL)
     assert strategy._decide(obs, mem) == Action.CHECK_CALL
+
+
+# ---------------------------------------------------------------------------
+# Measured fold rate to our first-in turn/river bets (fix #1b): only checks
+# become bets
+# ---------------------------------------------------------------------------
+
+def _true_bet_folds(history, me):
+    """From the engine log: per (turn/river street, bet size) [bets, folds] for
+    OUR bets that faced no bet (first action of the street, or the previous
+    action on the street was not an opponent raise), answered by its next
+    action. Written independently of strategy._learn."""
+    out = {(s, a): [0, 0] for s in (2, 3) for a in (H, P)}
+    for i, rec in enumerate(history):
+        if rec.seat != me or rec.street not in (2, 3) or rec.action not in (H, P):
+            continue
+        prev = history[i - 1] if i and history[i - 1].street == rec.street else None
+        if prev is not None and prev.seat != me and prev.action in (H, P):
+            continue                    # a raise over its bet, not a first-in bet
+        nxt = history[i + 1] if i + 1 < len(history) else None
+        assert nxt is not None and nxt.seat != me and nxt.street == rec.street
+        out[(int(rec.street), rec.action)][0] += 1
+        out[(int(rec.street), rec.action)][1] += nxt.action == F
+    return out
+
+
+def _bet_fold_counts(memory):
+    return {(int(s), a): list(v) for s, d in memory["stats"]["bet_fold"].items() for a, v in d.items()}
+
+
+@pytest.mark.parametrize("opp_name,skip", [("random_aggro", 0.0), ("learner", 0.0), ("lag", 0.0),
+                                           ("nit", 0.0), ("tag", 0.0), ("random_skip", 0.15)])
+def test_bet_fold_counter_matches_engine_log(opp_name, skip):
+    import strategy
+    from game import default_action
+    opp = _random_opp(0.3, opp_name) if opp_name.startswith("random") else _sparring(opp_name)
+    memory, opp_mem = {}, {}
+    strategy.new_half(AgentConfig(), memory)
+    opp.new_half(AgentConfig(), opp_mem)
+    rng = random.Random(opp_name)
+    bets = folds = 0
+    for hand in range(300):
+        me = (hand // 2) % 2
+        game = Game(make_deal("betfold-" + opp_name, hand), button_seat=hand % 2, hand_index=hand)
+        skipped = False
+        while not game.is_terminal:
+            obs = game.observation(game.to_act)
+            if game.to_act == me:
+                if rng.random() < skip:
+                    action, skipped = default_action(obs.to_call), True
+                else:
+                    action = strategy.choose_action(obs, memory)
+            else:
+                action = opp.choose_action(obs, opp_mem)
+            game.apply(action)
+        before = _bet_fold_counts(memory)
+        strategy.on_hand_end(game.hand_result(me), memory)
+        opp.on_hand_end(game.hand_result(1 - me), opp_mem)
+        after = _bet_fold_counts(memory)
+        got = {k: [a - b for a, b in zip(after[k], before[k])] for k in after}
+        want = _true_bet_folds(game.result().history, me)
+        bets += sum(v[0] for v in want.values())
+        folds += sum(v[1] for v in want.values())
+        if skipped:                     # partial record: may miss, never invent
+            assert all(g <= w for k in got for g, w in zip(got[k], want[k])), (hand, got, want)
+        else:
+            assert got == want, (hand, got, want, game.result().history)
+    assert bets > 20
+    if opp_name != "nit":
+        assert folds > 0
+
+
+def test_bet_fold_counted_in_scripted_hands(monkeypatch):
+    from game import Street
+    # We are BB: check the flop, then bet half pot on the turn; it folds.
+    _, mem, _ = _scripted([C, C, C, C, H, F], me_button=False, monkeypatch=monkeypatch)
+    assert mem["stats"]["bet_fold"][Street.TURN][H] == [1, 1]
+    # Pot bet on the river, it calls (inferred from the showdown).
+    _, mem, g = _scripted([C, C, C, C, C, C, P, C], me_button=False, monkeypatch=monkeypatch)
+    assert g.result().went_to_showdown
+    assert mem["stats"]["bet_fold"][Street.RIVER][P] == [1, 0]
+    # Button: it checks the turn, we bet pot, it re-raises (not a fold), we fold.
+    _, mem, _ = _scripted([C, C, C, C, C, P, H, F], me_button=True, monkeypatch=monkeypatch)
+    assert mem["stats"]["bet_fold"][Street.TURN][P] == [1, 0]
+    # A raise over ITS turn bet is not a first-in bet.
+    _, mem, _ = _scripted([C, C, C, C, H, H, F], me_button=True, monkeypatch=monkeypatch)
+    assert mem["stats"]["bet_fold"][Street.TURN] == {H: [0, 0], P: [0, 0]}
+    # Flop bets are not tracked.
+    _, mem, _ = _scripted([C, C, H, F], me_button=False, monkeypatch=monkeypatch)
+    assert all(v == [0, 0] for d in mem["stats"]["bet_fold"].values() for v in d.values())
+
+
+def test_bet_fold_rate_smoothing_and_cap():
+    import strategy
+    from game import Street
+    assert (strategy.BET_FOLD_PRIOR, strategy.BET_FOLD_WEIGHT, strategy.BET_FOLD_CAP) == (0.30, 20, 0.75)
+    st = strategy._new_stats()
+    assert strategy._bet_fold_rate(st, Street.TURN, H) == pytest.approx(0.30)
+    st["bet_fold"][Street.RIVER][P] = [10, 8]
+    assert strategy._bet_fold_rate(st, Street.RIVER, P) == pytest.approx((8 + 6) / 30)
+    st["bet_fold"][Street.RIVER][P] = [1000, 990]
+    assert strategy._bet_fold_rate(st, Street.RIVER, P) == pytest.approx(0.75)
+
+
+def test_top_equity_drops_the_weakest_hands():
+    import numpy as np
+    import strategy
+    # its hands ranked by `now`: the 2 weakest lose to us, the 2 best beat us
+    my = np.array([5, 5, 5, 5])
+    opp = np.array([1, 2, 8, 9])
+    now = np.array([1, 2, 8, 9])
+    assert strategy._top_equity((my, opp, now), 1.0) == pytest.approx(0.5)
+    assert strategy._top_equity((my, opp, now), 0.5) == pytest.approx(0.0)
+    assert strategy._top_equity((my, opp, now), 0.0) == pytest.approx(0.0)   # never empty
+
+
+def _turn_check_obs():
+    """BB to act first on the turn, nothing to call (both checked the flop)."""
+    obs = _obs_after([C, C, C, C])
+    assert obs.street == 2 and obs.to_call == 0 and not obs.is_button
+    return obs
+
+
+@pytest.mark.parametrize("e_now,counts,want", [
+    (0.5, [1000, 750], H),    # folds 75%: half-pot bet beats the check even if never ahead when called
+    (0.5, [1000, 0], C),      # it never folds: keep checking
+    (0.9, [1000, 750], C),    # strong hand: the check is still worth more
+])
+def test_measured_bet_turns_a_check_into_a_bet(monkeypatch, e_now, counts, want):
+    import numpy as np
+    import strategy
+    from game import Street
+    obs = _turn_check_obs()
+    st = strategy._new_stats()
+    for a in (H, P):
+        st["bet_fold"][Street.TURN][a] = list(counts)
+    monkeypatch.setattr(strategy, "_top_equity", lambda sims, frac: 0.0)
+    ev = strategy._action_evs(obs, e_now, 0.3, 0.02)     # today's model: checking is best
+    assert max(ev, key=ev.get) == C
+    sims = (np.zeros(4), np.zeros(4), np.zeros(4))
+    assert strategy._measured_bet(obs, ev, e_now, sims, 1.0, st, {}) == want
+
+
+def test_measured_bet_keeps_a_check_when_the_bet_was_already_best(monkeypatch):
+    # _mix chose to check although the same bet was already best (slowplay): unchanged.
+    import numpy as np
+    import strategy
+    from game import Street
+    obs = _turn_check_obs()
+    st = strategy._new_stats()
+    for a in (H, P):
+        st["bet_fold"][Street.TURN][a] = [1000, 750]
+    monkeypatch.setattr(strategy, "_top_equity", lambda sims, frac: 0.0)
+    ev = {C: 0.0, H: 1.0, P: 0.5}             # half pot already best
+    assert strategy._measured_bet(obs, ev, 0.5, (np.zeros(4),) * 3, 1.0, st, {}) == C
+
+
+@pytest.mark.parametrize("script,mixed,want", [
+    ([C, C, C, C], H, H),                  # turn: our bets and their sizes are never changed
+    ([C, C, C, C], P, P),
+    ([C, C], C, C),                        # flop check: untouched
+    ([C, C, C, C, C, H], C, C),            # turn call of its bet: untouched
+    ([C, C, C, C, C, H], F, F),            # turn fold to its bet: untouched
+])
+def test_decide_never_changes_bets_flop_or_facing_a_bet(monkeypatch, script, mixed, want):
+    import strategy
+    monkeypatch.setattr(strategy, "_mix", lambda obs, ev, e_now, rng, m=mixed: m)
+    mem = {}
+    strategy.new_half(AgentConfig(), mem)
+    for s in strategy.BET_FOLD_STREETS:
+        for a in (H, P):
+            mem["stats"]["bet_fold"][s][a] = [1000, 750]
+    assert strategy._decide(_obs_after(script), mem) == want
+    assert mem.get("mode_counts", {}).get("fb_bet", 0) == 0
+
+
+def test_decide_uses_measured_bet_on_turn_checks(monkeypatch):
+    import strategy
+    monkeypatch.setattr(strategy, "_mix", lambda obs, ev, e_now, rng: C)
+    seen = []
+    real = strategy._measured_bet
+
+    def spy(*args):
+        out = real(*args)
+        seen.append(out)
+        return out
+    monkeypatch.setattr(strategy, "_measured_bet", spy)
+    mem = {}
+    strategy.new_half(AgentConfig(), mem)
+    assert strategy._decide(_turn_check_obs(), mem) == seen[-1]
+    assert len(seen) == 1
